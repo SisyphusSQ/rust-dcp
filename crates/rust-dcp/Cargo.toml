@@ -1,0 +1,15 @@
+[package]
+name = "rust-dcp"
+description = "Asynchronous Rust SDK for Couchbase Database Change Protocol consumers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+rust-dcp-protocol = { path = "../rust-dcp-protocol", version = "0.1.0" }
+
+[lints]
+workspace = true
