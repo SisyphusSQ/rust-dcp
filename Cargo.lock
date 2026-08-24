@@ -318,6 +318,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "subtle",

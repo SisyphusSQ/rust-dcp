@@ -9,6 +9,7 @@ mod checkpoint;
 mod config;
 mod error;
 mod event;
+mod topology;
 mod transport;
 
 pub use assignment::{AssignmentMode, VBucketAssignment};
@@ -28,5 +29,9 @@ pub use event::{
     DataType, DcpDeletion, DcpEvent, DcpExpiration, DcpMutation, OsoSnapshot, OsoSnapshotState,
     SeqNoAdvanced, SnapshotFlags, SnapshotMarker, StreamEnd, StreamEndReason, SystemEvent,
     SystemEventKind,
+};
+pub use topology::{
+    ClusterTopology, KvEndpoint, NodeId, TopologyChange, TopologyNetwork, TopologyRevision,
+    TopologyState, discover_topology, fetch_active_high_seqnos, fetch_failover_log,
 };
 pub use transport::{AsyncIo, BoxedIo, KvConnection};
