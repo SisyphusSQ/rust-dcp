@@ -1,71 +1,133 @@
 # rust-dcp
 
-An asynchronous Rust SDK for building reliable Couchbase Database Change Protocol (DCP) consumers.
+An asynchronous, embeddable Rust SDK for building reliable Couchbase Database Change Protocol (DCP) consumers on Tokio.
 
-## Purpose
+The frozen first-release feature scope is implemented and covered by deterministic unit and mock-transport tests. Live Couchbase Server E2E validation is intentionally tracked as a separate phase; see the [compatibility matrix](docs/compatibility.md) for the exact boundary.
 
-`rust-dcp` is designed as an independent, embeddable library. It focuses on protocol correctness, resumable delivery, and clear recovery semantics while leaving application-specific scheduling and downstream storage to the integrating application.
+## Capabilities
 
-The core delivery contract is:
+- password authentication with SASL PLAIN or SCRAM, plus TCP or TLS with platform and custom root CAs;
+- bucket, scope, collection, whole-scope, and server-side multi-collection streams;
+- mutation, deletion, expiration, snapshot marker, `SeqNoAdvanced`, system event, stream-end, and OSO marker models;
+- earliest, latest, and durable-checkpoint starts in finite or infinite mode;
+- CCCP topology discovery, active-vBucket routing, failover logs, high sequence numbers, topology refresh, and stream reopen;
+- DCP flow control, NOOP handling, dead-connection detection, bounded queues, and generation fencing;
+- manual or automatic per-vBucket checkpoints backed by a file, Couchbase XATTR documents, or a custom async store;
+- explicit rollback policy and active-plus-replica persistence rollback mitigation;
+- DCP priority, optional Couchbase Change Streams, Snappy decompression, datatype flags, and raw XATTR framing;
+- standalone or externally fenced assignments, with optional Couchbase and Kubernetes membership crates;
+- application-owned metrics export, health snapshots, and `tracing` instrumentation without a forced HTTP server.
 
-- ordered delivery within each vBucket;
-- at-least-once processing semantics;
-- explicit checkpoints that retain the vBucket UUID, sequence number, and snapshot bounds;
-- observable failover and rollback decisions;
-- no implicit claim of cluster-wide ordering or exactly-once effects.
+OSO packets are parsed and remain visible, but rust-dcp does not request OSO enablement. This is deliberate until an OSO-aware checkpoint/recovery contract is defined.
 
-## Architecture
+## Quick start
 
-The implementation is organized into four boundaries:
+```rust,no_run
+use std::sync::Arc;
 
-```text
-Application or integration adapter
-        │  partition ownership, generation fencing,
-        │  downstream commit, checkpoint persistence
-        ▼
-rust-dcp
-        │  subscription API, events, delivery lifecycle
-        ▼
-rust-dcp-core
-        │  topology, node connections, stream lifecycle,
-        │  reconnect, failover, rollback, flow control
-        ▼
-rust-dcp-protocol
-           binary framing, opcodes, message codecs
+use futures_util::StreamExt;
+use rust_dcp::{
+    CheckpointStore, Credentials, DcpClient, DcpConfig, DcpEvent, DcpSubscriptionSpec,
+    FileCheckpointStore,
+};
+
+struct Target;
+
+impl Target {
+    async fn apply(&self, _event: &DcpEvent) -> rust_dcp::Result<()> {
+        // Commit to the downstream system here.
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> rust_dcp::Result<()> {
+    let config = DcpConfig::builder(Credentials::new("user", "password"), "source-bucket")
+        .seed("127.0.0.1")?
+        .build()?;
+    let client = DcpClient::connect(config).await?;
+    let checkpoint_store: Arc<dyn CheckpointStore> =
+        Arc::new(FileCheckpointStore::new("./checkpoints.json")?);
+    let spec = DcpSubscriptionSpec::standalone(checkpoint_store);
+    let mut subscription = client.subscribe(spec).await?;
+    let target = Target;
+
+    while let Some(delivery) = subscription.next().await.transpose()? {
+        target.apply(delivery.event()).await?;
+        delivery.mark_processed().await?;
+    }
+
+    subscription.close().await?;
+    client.close().await?;
+    Ok(())
+}
 ```
 
-The SDK owns Couchbase topology and DCP stream behavior. The integrating application owns worker assignment, leases, deployment concerns, and the durability policy for its downstream system.
+`DcpSubscription` implements `futures_util::Stream<Item = rust_dcp::Result<DcpDelivery>>`. A `DcpDelivery` is consumed by `mark_processed`; dropping it without marking it processed does not advance the durable checkpoint.
 
-## Delivery and recovery semantics
+## Delivery and recovery contract
 
-Network flow control, application processing, and checkpoint persistence are separate operations:
+Delivery is ordered within each vBucket and at least once. rust-dcp does not claim cluster-wide ordering or exactly-once downstream effects.
+
+Network flow control, application processing, and checkpoint persistence are separate lifecycle points:
 
 ```text
-buffer credit returned
-        ≠ application processing completed
-        ≠ checkpoint durably persisted
+network buffer credit returned
+        != application processing completed
+        != checkpoint durably persisted
 ```
 
-A delivery is eligible for checkpoint advancement only after the application has completed processing and the checkpoint store has durably accepted the contiguous per-vBucket position. Out-of-order completion must not skip an earlier gap.
+Network credit is based on bounded runtime admission and cannot be delayed indefinitely by the application. `mark_processed` advances only contiguous application progress. Checkpoint coordinator flushes—during required initialization, an explicit `DcpSubscription::flush`, the automatic scheduler, or final shutdown—make that progress durable.
 
-Rollback is surfaced as an explicit recovery event. The default policy is to stop and report so that the application can choose between replay, partition rebuild, or another verified repair path. Silent rewind is not assumed to be safe for every downstream system.
+Rollback is never silently hidden. `RollbackPolicy::StopAndReport` is the default. `RewindAndReplay` must be selected explicitly, and `DelegateToHandler` requires an application callback. Rollback mitigation is enabled by default: delivery waits for the active and every available replica to persist the required history position, polling every 1 second with a 5-second node-batch timeout and a 60-second maximum delivery stall.
 
-## Scope
+## Checkpoint stores
 
-The planned capability set covers:
+- `FileCheckpointStore` atomically replaces a go-dcp-compatible JSON file.
+- `CouchbaseCheckpointStore::from_config` uses the built-in Tokio KV/XATTR adapter and go-dcp v1.3.1 metadata keys, XATTR name, and document schema.
+- `CouchbaseCheckpointStore::from_config_in_collection` places metadata in a named scope and collection.
+- Implement `CheckpointStore` for a fully custom asynchronous backend, or implement `CouchbaseCheckpointCollection` to reuse the go-dcp-compatible Couchbase metadata policy with another KV adapter.
 
-1. binary framing, authentication, bucket selection, DCP session setup, and event codecs;
-2. flow control, NOOP handling, snapshot markers, stream end, and sequence advancement;
-3. vBucket topology discovery and multiplexed connections to the active nodes;
-4. reconnect, failover-log evaluation, rollback handling, and generation fencing;
-5. collections, scopes, system events, manifests, filters, compression, and durable checkpoint stores;
-6. standalone consumption and integration hooks for applications that already manage partition assignment.
+Every store is bucket-UUID scoped. A checkpoint from a recreated bucket is reported as an error instead of being silently reused.
 
-The initial implementation will keep OSO disabled until its recovery model is fully specified and tested.
+## Assignment and membership
+
+`DcpSubscriptionSpec::standalone` owns every current vBucket. `DcpSubscriptionSpec::external` accepts a `VBucketAssignment` with a monotonic generation fence for applications that own scheduling and leases.
+
+Optional coordination runtimes are separate crates:
+
+- `rust-dcp-membership-couchbase`: CAS-fenced registry, heartbeats, stale-member pruning, and deterministic rebalance, with a built-in Tokio KV store;
+- `rust-dcp-membership-kubernetes`: StatefulSet ordinal assignment or a Tokio Kubernetes Pod watcher with UID fencing and ready/running membership rules.
+
+Membership updates produce assignments; the integrating application owns subscription replacement at an assignment boundary.
+
+## Observability
+
+`DcpClient::metrics` and `DcpSubscription::metrics` return cloneable counters/gauges with snapshot APIs. Health handles expose bootstrap, probe, topology-generation, connection, failure, and stopped state. Runtime operations emit `tracing` spans and events. Export format, HTTP endpoints, and OpenTelemetry/Prometheus integration remain application choices.
+
+## Crates
+
+| Crate | Responsibility |
+|---|---|
+| `rust-dcp` | Umbrella public API |
+| `rust-dcp-core` | Tokio transport, topology, stream lifecycle, checkpoints, rollback, collections, and client API |
+| `rust-dcp-protocol` | Memcached/DCP framing, commands, parsers, and event codecs |
+| `rust-dcp-membership-couchbase` | Couchbase-backed membership and assignment extension |
+| `rust-dcp-membership-kubernetes` | Kubernetes-backed membership and assignment extension |
+
+The SDK owns Couchbase protocol, topology, and stream correctness. The application owns downstream durability, assignment orchestration, deployment, and exporter choices.
+
+## Compatibility and validation
+
+The behavioral baseline is [go-dcp v1.3.1](https://github.com/Trendyol/go-dcp/tree/v1.3.1), with low-level wire behavior checked against [gocbcore v10.7.1](https://github.com/couchbase/gocbcore/tree/v10.7.1).
+
+See [docs/compatibility.md](docs/compatibility.md) for feature-by-feature behavior, intentional differences, Server capability gates, deterministic validation evidence, and the deferred live E2E matrix.
+
+The workspace requires Rust 1.85 or newer and uses the 2024 edition.
 
 ## Status
 
-This repository is the public home for the design and implementation of `rust-dcp`. The API and module boundaries may evolve as protocol behavior is validated against supported Couchbase Server versions.
+The complete frozen feature scope is present on `main`. The public API is versioned as `0.1.0` and may still evolve before a stable semver release. Live Couchbase Server E2E, performance characterization, packaging, and release publication are outside the completed implementation/unit-test boundary.
 
 ## License
 
