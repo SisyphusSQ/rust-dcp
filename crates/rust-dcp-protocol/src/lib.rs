@@ -4,5 +4,31 @@
 
 #![forbid(unsafe_code)]
 
+mod codec;
+mod command;
+mod dcp;
+mod error;
+mod frame;
+mod types;
+mod uleb128;
+
+pub use codec::FrameCodec;
+pub use command::{
+    DcpOpenFlags, DcpStreamFlags, HelloFeature, StreamFilter, StreamRequest, StreamRequestResponse,
+    VBucketSeqNo, VBucketState, buffer_ack, close_stream, dcp_control, dcp_open,
+    get_cluster_config, get_failover_log, get_vbucket_seqnos, hello, noop_response,
+    parse_failover_log, parse_stream_request_response, parse_vbucket_seqnos, sasl_auth,
+    sasl_list_mechanisms, sasl_step, select_bucket, stream_request,
+};
+pub use dcp::{
+    DcpDeletion, DcpExpiration, DcpMessage, DcpMutation, OsoSnapshot, OsoSnapshotState,
+    SeqNoAdvanced, SnapshotMarker, StreamEnd, StreamEndReason, SystemEvent, SystemEventKind,
+    parse_dcp_message,
+};
+pub use error::{ProtocolError, Result};
+pub use frame::{Frame, FramingExtra};
+pub use types::{FailoverEntry, Magic, Opcode, Status};
+pub use uleb128::{decode_uleb128_u32, encode_uleb128_u32};
+
 /// Size of a classic Memcached binary protocol header.
 pub const HEADER_LEN: usize = 24;

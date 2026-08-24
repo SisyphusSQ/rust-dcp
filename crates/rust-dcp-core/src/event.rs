@@ -197,6 +197,8 @@ pub enum StreamEndReason {
     TooSlow,
     /// Backfill could not be completed.
     BackfillFailed,
+    /// Server-side collection filter became empty.
+    FilterEmpty,
     /// Unrecognized future reason.
     Unknown(u32),
 }
