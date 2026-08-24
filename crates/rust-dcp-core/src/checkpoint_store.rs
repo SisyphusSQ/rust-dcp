@@ -46,6 +46,92 @@ pub trait CheckpointStore: Send + Sync {
     ) -> CheckpointStoreFuture<'a, ()>;
 }
 
+/// Checkpoint store that deliberately never persists state.
+///
+/// Loads always return an empty map so the configured start-position fallback
+/// applies. Saves and clears succeed without side effects, matching go-dcp's
+/// noop metadata mode.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopCheckpointStore;
+
+impl NoopCheckpointStore {
+    /// Creates a no-op checkpoint store.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl CheckpointStore for NoopCheckpointStore {
+    fn load<'a>(
+        &'a self,
+        _bucket_uuid: &'a str,
+        _vbuckets: &'a [u16],
+    ) -> CheckpointStoreFuture<'a, BTreeMap<u16, DcpCheckpoint>> {
+        Box::pin(async { Ok(BTreeMap::new()) })
+    }
+
+    fn save<'a>(&'a self, _checkpoints: &'a [DcpCheckpoint]) -> CheckpointStoreFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn clear<'a>(
+        &'a self,
+        _bucket_uuid: &'a str,
+        _vbuckets: &'a [u16],
+    ) -> CheckpointStoreFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Read-only checkpoint adapter over another asynchronous store.
+///
+/// Loads are delegated to the wrapped store. Saves and clears succeed without
+/// touching it, allowing repeatable replay/debug sessions from a durable
+/// checkpoint without mutating that checkpoint.
+#[derive(Clone)]
+pub struct ReadOnlyCheckpointStore {
+    inner: Arc<dyn CheckpointStore>,
+}
+
+impl std::fmt::Debug for ReadOnlyCheckpointStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReadOnlyCheckpointStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReadOnlyCheckpointStore {
+    /// Wraps a checkpoint store and suppresses all mutations.
+    #[must_use]
+    pub fn new(inner: Arc<dyn CheckpointStore>) -> Self {
+        Self { inner }
+    }
+}
+
+impl CheckpointStore for ReadOnlyCheckpointStore {
+    fn load<'a>(
+        &'a self,
+        bucket_uuid: &'a str,
+        vbuckets: &'a [u16],
+    ) -> CheckpointStoreFuture<'a, BTreeMap<u16, DcpCheckpoint>> {
+        self.inner.load(bucket_uuid, vbuckets)
+    }
+
+    fn save<'a>(&'a self, _checkpoints: &'a [DcpCheckpoint]) -> CheckpointStoreFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn clear<'a>(
+        &'a self,
+        _bucket_uuid: &'a str,
+        _vbuckets: &'a [u16],
+    ) -> CheckpointStoreFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// Atomic, go-dcp-compatible JSON checkpoint file.
 pub struct FileCheckpointStore {
     path: PathBuf,
@@ -778,6 +864,38 @@ mod tests {
             Err(DcpError::CheckpointStore(_))
         ));
         fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn noop_store_always_loads_empty_and_accepts_writes_and_clears() {
+        let store = NoopCheckpointStore;
+
+        assert!(store.load("bucket-id", &[7, 8]).await.unwrap().is_empty());
+        store.save(&[checkpoint(7, 10, "bucket-id")]).await.unwrap();
+        store.clear("bucket-id", &[7]).await.unwrap();
+        assert!(store.load("bucket-id", &[7]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_store_delegates_load_but_suppresses_save_and_clear() {
+        let path = temporary_path("read-only-checkpoint");
+        let writable = Arc::new(FileCheckpointStore::new(path.clone()).unwrap());
+        writable
+            .save(&[checkpoint(7, 10, "bucket-id")])
+            .await
+            .unwrap();
+        let store = ReadOnlyCheckpointStore::new(writable.clone());
+
+        assert_eq!(store.load("bucket-id", &[7]).await.unwrap()[&7].seqno, 10);
+        store.save(&[checkpoint(7, 20, "bucket-id")]).await.unwrap();
+        store.clear("bucket-id", &[7]).await.unwrap();
+
+        assert_eq!(
+            writable.load("bucket-id", &[7]).await.unwrap()[&7].seqno,
+            10
+        );
+        writable.clear("bucket-id", &[7]).await.unwrap();
+        assert!(!path.exists());
     }
 
     #[tokio::test]

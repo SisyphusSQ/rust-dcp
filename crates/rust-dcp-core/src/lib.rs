@@ -36,7 +36,7 @@ pub use checkpoint_runtime::{
 };
 pub use checkpoint_store::{
     CheckpointStore, CheckpointStoreFuture, CouchbaseCheckpointCollection,
-    CouchbaseCheckpointStore, FileCheckpointStore,
+    CouchbaseCheckpointStore, FileCheckpointStore, NoopCheckpointStore, ReadOnlyCheckpointStore,
 };
 pub use client::{DcpClient, DcpDelivery, DcpSubscription, DcpSubscriptionSpec};
 pub use collections::{
@@ -47,8 +47,8 @@ pub use collections::{
 };
 pub use config::{
     CheckpointConfig, CheckpointMode, CollectionFilter, Credentials, DcpConfig, DcpConfigBuilder,
-    DcpMode, DcpPriority, FlowControlConfig, HealthCheckConfig, RollbackMitigationConfig,
-    RollbackPolicy, SeedAddress, StartPosition, TlsConfig,
+    DcpMode, DcpPriority, FlowControlConfig, HealthCheckConfig, ListenerConfig,
+    RollbackMitigationConfig, RollbackPolicy, SeedAddress, StartPosition, TlsConfig,
 };
 pub use error::{DcpError, Result};
 pub use event::{

@@ -9,10 +9,11 @@ The frozen first-release feature scope is implemented and covered by determinist
 - password authentication with SASL PLAIN or SCRAM, plus TCP or TLS with platform and custom root CAs;
 - bucket, scope, collection, whole-scope, and server-side multi-collection streams;
 - mutation, deletion, expiration, snapshot marker, `SeqNoAdvanced`, system event, stream-end, and OSO marker models;
+- optional go-dcp-compatible `listener.skipUntil` filtering with checkpoint-safe internal progress;
 - earliest, latest, and durable-checkpoint starts in finite or infinite mode;
 - CCCP topology discovery, active-vBucket routing, failover logs, high sequence numbers, topology refresh, and stream reopen;
 - DCP flow control, NOOP handling, dead-connection detection, bounded queues, and generation fencing;
-- manual or automatic per-vBucket checkpoints backed by a file, Couchbase XATTR documents, or a custom async store;
+- manual or automatic per-vBucket checkpoints backed by a file, Couchbase XATTR documents, noop/read-only adapters, or a custom async store;
 - explicit rollback policy and active-plus-replica persistence rollback mitigation;
 - DCP priority, optional Couchbase Change Streams, Snappy decompression, datatype flags, and raw XATTR framing;
 - standalone or externally fenced assignments, with optional Couchbase and Kubernetes membership crates;
@@ -81,14 +82,38 @@ Network credit is based on bounded runtime admission and cannot be delayed indef
 
 Rollback is never silently hidden. `RollbackPolicy::StopAndReport` is the default. `RewindAndReplay` must be selected explicitly, and `DelegateToHandler` requires an application callback. Rollback mitigation is enabled by default: delivery waits for the active and every available replica to persist the required history position, polling every 1 second with a 5-second node-batch timeout and a 60-second maximum delivery stall.
 
+### Listener cutoff
+
+`ListenerConfig::skip_until` matches go-dcp's `dcp.listener.skipUntil`: mutation, deletion, and expiration CAS values are interpreted as nanoseconds since the Unix epoch and truncated to whole seconds before comparison. Events strictly before the cutoff are not delivered; an event at the cutoff second is delivered. Snapshot markers, `SeqNoAdvanced`, system events, stream ends, and OSO markers remain visible.
+
+```rust,no_run
+use std::time::{Duration, UNIX_EPOCH};
+
+use rust_dcp::{Credentials, DcpConfig, ListenerConfig};
+
+let config = DcpConfig::builder(Credentials::new("user", "password"), "source-bucket")
+    .seed("127.0.0.1")?
+    .listener(ListenerConfig {
+        skip_until: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+    })
+    .build()?;
+# Ok::<(), rust_dcp::DcpError>(())
+```
+
+Skipped document events still pass rollback mitigation and are internally acknowledged by the checkpoint coordinator. They therefore advance contiguous progress without requiring an application callback and are not counted as delivered or application-processed events.
+
 ## Checkpoint stores
 
 - `FileCheckpointStore` atomically replaces a go-dcp-compatible JSON file.
 - `CouchbaseCheckpointStore::from_config` uses the built-in Tokio KV/XATTR adapter and go-dcp v1.3.1 metadata keys, XATTR name, and document schema.
 - `CouchbaseCheckpointStore::from_config_in_collection` places metadata in a named scope and collection.
+- `NoopCheckpointStore` always starts from the configured fallback and accepts save/clear calls without persistence.
+- `ReadOnlyCheckpointStore` loads from a wrapped store but suppresses save/clear, so replay/debug sessions cannot alter the source checkpoint.
 - Implement `CheckpointStore` for a fully custom asynchronous backend, or implement `CouchbaseCheckpointCollection` to reuse the go-dcp-compatible Couchbase metadata policy with another KV adapter.
 
 Every store is bucket-UUID scoped. A checkpoint from a recreated bucket is reported as an error instead of being silently reused.
+
+Noop and read-only modes deliberately do not retain new progress across restarts. Their successful no-op writes prevent repeated in-process flush attempts; choose a writable store whenever restart continuity is required.
 
 ## Assignment and membership
 

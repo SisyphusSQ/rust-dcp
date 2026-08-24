@@ -7,7 +7,8 @@ use rust_dcp::{
     AssignmentMode, CheckpointStore, ClusterTopology, CouchbaseCheckpointCollectionSpec,
     CouchbaseCheckpointStore, CouchbaseKvCheckpointCollection, DcpClient, DcpConfig, DcpDelivery,
     DcpHealth, DcpHealthStatus, DcpMetrics, DcpSubscription, DcpSubscriptionSpec,
-    FileCheckpointStore, RollbackMitigationConfig, TopologyNetwork,
+    FileCheckpointStore, ListenerConfig, NoopCheckpointStore, ReadOnlyCheckpointStore,
+    RollbackMitigationConfig, TopologyNetwork,
 };
 
 #[cfg(feature = "prometheus")]
@@ -34,6 +35,8 @@ fn umbrella_crate_exposes_the_tokio_client_lifecycle() {
         FileCheckpointStore::new(std::env::temp_dir().join("rust-dcp-public-api.json")).unwrap(),
     );
     let spec = DcpSubscriptionSpec::standalone(store).stream_id(Some(7));
+    let noop: Arc<dyn CheckpointStore> = Arc::new(NoopCheckpointStore::new());
+    let _read_only = ReadOnlyCheckpointStore::new(noop);
 
     assert!(matches!(spec.assignment(), AssignmentMode::Standalone));
     assert_eq!(spec.stream_id_value(), Some(7));
@@ -43,6 +46,7 @@ fn umbrella_crate_exposes_the_tokio_client_lifecycle() {
     let _ = std::any::type_name::<DcpHealth>();
     let _ = std::any::type_name::<DcpMetrics>();
     let _ = std::any::type_name::<RollbackMitigationConfig>();
+    let _ = std::any::type_name::<ListenerConfig>();
     let _ = std::any::type_name::<ClusterTopology>();
     let _ = std::any::type_name::<TopologyNetwork>();
     let _ = std::any::type_name::<CouchbaseCheckpointCollectionSpec>();
