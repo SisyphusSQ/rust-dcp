@@ -36,7 +36,7 @@ pub struct KvConnection {
     request_timeout: Duration,
     next_opaque: u32,
     pending: VecDeque<Frame>,
-    last_activity: Instant,
+    last_inbound_activity: Instant,
 }
 
 impl std::fmt::Debug for KvConnection {
@@ -46,7 +46,7 @@ impl std::fmt::Debug for KvConnection {
             .field("peer", &self.peer)
             .field("request_timeout", &self.request_timeout)
             .field("pending_frames", &self.pending.len())
-            .field("last_activity", &self.last_activity)
+            .field("last_inbound_activity", &self.last_inbound_activity)
             .finish_non_exhaustive()
     }
 }
@@ -104,7 +104,7 @@ impl KvConnection {
             request_timeout,
             next_opaque: 1,
             pending: VecDeque::new(),
-            last_activity: Instant::now(),
+            last_inbound_activity: Instant::now(),
         }
     }
 
@@ -114,10 +114,10 @@ impl KvConnection {
         &self.peer
     }
 
-    /// Last successful send or receive time.
+    /// Time of the last successfully decoded inbound frame.
     #[must_use]
-    pub fn last_activity(&self) -> Instant {
-        self.last_activity
+    pub fn last_inbound_activity(&self) -> Instant {
+        self.last_inbound_activity
     }
 
     /// Enables collection-ID key decoding after successful HELLO negotiation.
@@ -133,7 +133,6 @@ impl KvConnection {
     /// Returns a protocol or I/O error from the Tokio framed sink.
     pub async fn send_frame(&mut self, frame: Frame) -> Result<()> {
         self.framed.send(frame).await?;
-        self.last_activity = Instant::now();
         Ok(())
     }
 
@@ -194,7 +193,7 @@ impl KvConnection {
                 format!("KV peer {} closed the connection", self.peer),
             ))
         })?;
-        self.last_activity = Instant::now();
+        self.last_inbound_activity = Instant::now();
         Ok(frame)
     }
 }
@@ -301,6 +300,21 @@ mod tests {
             connection.request(Frame::request(Opcode::HELLO)).await,
             Err(DcpError::Timeout(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn outbound_writes_do_not_refresh_inbound_liveness() {
+        let (client_io, _server_io) = duplex(4_096);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        let before = connection.last_inbound_activity();
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        connection
+            .send_frame(Frame::request(Opcode::NOOP))
+            .await
+            .unwrap();
+
+        assert_eq!(connection.last_inbound_activity(), before);
     }
 
     #[test]

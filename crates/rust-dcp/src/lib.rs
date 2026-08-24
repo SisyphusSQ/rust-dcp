@@ -16,10 +16,13 @@ pub mod protocol {
 }
 
 pub use rust_dcp_core::{
-    AssignmentMode, CheckpointConfig, CheckpointMode, CollectionFilter, Credentials, DataType,
-    DcpCheckpoint, DcpConfig, DcpConfigBuilder, DcpDeletion, DcpError, DcpEvent, DcpExpiration,
-    DcpMode, DcpMutation, DcpPriority, FailoverEntry, FlowControlConfig, HealthCheckConfig,
-    OsoSnapshot, OsoSnapshotState, RollbackPolicy, SeedAddress, SeqNoAdvanced, SnapshotFlags,
-    SnapshotMarker, StartPosition, StreamEnd, StreamEndReason, SystemEvent, SystemEventKind,
-    TlsConfig, VBucketAssignment,
+    AssignmentMode, BootstrapCapabilities, CheckpointConfig, CheckpointMode, CollectionFilter,
+    Credentials, DataType, DcpCheckpoint, DcpConfig, DcpConfigBuilder, DcpConnection,
+    DcpControlFeature, DcpDeletion, DcpError, DcpEvent, DcpExpiration, DcpMode, DcpMutation,
+    DcpPriority, DcpStream, DcpStreamFlags, DcpStreamItem, FailoverEntry, FlowControlConfig,
+    HealthCheckConfig, OsoSnapshot, OsoSnapshotState, PartitionOpenState, RollbackAction,
+    RollbackApplied, RollbackHandler, RollbackPolicy, RollbackRequest, SeedAddress, SeqNoAdvanced,
+    SnapshotFlags, SnapshotMarker, StartPosition, StreamEnd, StreamEndReason, StreamFilter,
+    StreamOpenReport, SystemEvent, SystemEventKind, TlsConfig, VBucketAssignment,
+    VBucketStreamRequest, bootstrap_connection, open_dcp_stream,
 };

@@ -116,14 +116,24 @@ impl BitOrAssign for DcpOpenFlags {
 pub struct DcpStreamFlags(u32);
 
 impl DcpStreamFlags {
+    /// Transfer vBucket ownership to the consumer.
+    pub const TAKEOVER: Self = Self(0x01);
     /// Read only on-disk items.
     pub const DISK_ONLY: Self = Self(0x02);
     /// Use the latest sequence number as the stream boundary.
     pub const LATEST: Self = Self(0x04);
+    /// Deprecated per-stream no-value mode.
+    pub const NO_VALUE: Self = Self(0x08);
     /// Connect only to an active vBucket.
     pub const ACTIVE_ONLY: Self = Self(0x10);
     /// Require an exact vBucket UUID match.
     pub const STRICT_VBUUID: Self = Self(0x20);
+    /// Ask the producer to start at its current high sequence number.
+    pub const FROM_LATEST: Self = Self(0x40);
+    /// Allow gaps caused only by already-purged tombstones.
+    pub const IGNORE_PURGED_TOMBSTONES: Self = Self(0x80);
+    /// Transfer eligible resident values before regular streaming.
+    pub const CACHE_TRANSFER: Self = Self(0x100);
 
     /// Raw flag bits.
     #[must_use]
@@ -427,6 +437,14 @@ pub fn noop_response(opaque: u32) -> Frame {
     frame
 }
 
+/// Builds a success response for a snapshot marker carrying the ACK flag.
+#[must_use]
+pub fn snapshot_marker_response(opaque: u32) -> Frame {
+    let mut frame = Frame::response(Opcode::DCP_SNAPSHOT_MARKER, Status::SUCCESS);
+    frame.opaque = opaque;
+    frame
+}
+
 /// Parses a successful failover-log response.
 ///
 /// # Errors
@@ -660,5 +678,27 @@ mod tests {
         assert_eq!(frame.magic, Magic::Response);
         assert_eq!(frame.opcode, Opcode::DCP_NOOP);
         assert_eq!(frame.opaque, 0xdead_beef);
+    }
+
+    #[test]
+    fn snapshot_marker_response_preserves_producer_opaque() {
+        let frame = snapshot_marker_response(0x1234_5678);
+        assert_eq!(frame.magic, Magic::Response);
+        assert_eq!(frame.opcode, Opcode::DCP_SNAPSHOT_MARKER);
+        assert_eq!(frame.status, Status::SUCCESS);
+        assert_eq!(frame.opaque, 0x1234_5678);
+    }
+
+    #[test]
+    fn stream_flags_match_memcached_protocol_values() {
+        assert_eq!(DcpStreamFlags::TAKEOVER.bits(), 0x01);
+        assert_eq!(DcpStreamFlags::DISK_ONLY.bits(), 0x02);
+        assert_eq!(DcpStreamFlags::LATEST.bits(), 0x04);
+        assert_eq!(DcpStreamFlags::NO_VALUE.bits(), 0x08);
+        assert_eq!(DcpStreamFlags::ACTIVE_ONLY.bits(), 0x10);
+        assert_eq!(DcpStreamFlags::STRICT_VBUUID.bits(), 0x20);
+        assert_eq!(DcpStreamFlags::FROM_LATEST.bits(), 0x40);
+        assert_eq!(DcpStreamFlags::IGNORE_PURGED_TOMBSTONES.bits(), 0x80);
+        assert_eq!(DcpStreamFlags::CACHE_TRANSFER.bits(), 0x100);
     }
 }

@@ -4,12 +4,12 @@ use std::{
 };
 
 use rust_dcp_protocol::{
-    FailoverEntry, Frame, Opcode, ProtocolError, VBucketState, get_cluster_config,
-    get_failover_log, get_vbucket_seqnos, parse_failover_log, parse_vbucket_seqnos,
+    Frame, Opcode, ProtocolError, VBucketState, get_cluster_config, get_failover_log,
+    get_vbucket_seqnos, parse_failover_log, parse_vbucket_seqnos,
 };
 use serde::Deserialize;
 
-use crate::{DcpError, KvConnection, Result};
+use crate::{DcpError, FailoverEntry, KvConnection, Result};
 
 /// Stable identity for one KV node across topology revisions.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -479,7 +479,13 @@ pub async fn fetch_failover_log(
         Opcode::DCP_GET_FAILOVER_LOG,
         "vBucket failover log",
     )?;
-    let entries = parse_failover_log(&response)?;
+    let entries = parse_failover_log(&response)?
+        .into_iter()
+        .map(|entry| FailoverEntry {
+            vbucket_uuid: entry.vbucket_uuid,
+            seqno: entry.seqno,
+        })
+        .collect::<Vec<_>>();
     if entries.is_empty() {
         return Err(DcpError::Topology(format!(
             "server returned an empty failover log for vBucket {vbucket}"
