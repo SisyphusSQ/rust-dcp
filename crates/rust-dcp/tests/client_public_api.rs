@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use futures_util::Stream;
 use rust_dcp::{
-    AssignmentMode, CheckpointStore, ClusterTopology, DcpClient, DcpDelivery, DcpHealth,
-    DcpHealthStatus, DcpMetrics, DcpSubscription, DcpSubscriptionSpec, FileCheckpointStore,
-    RollbackMitigationConfig, TopologyNetwork,
+    AssignmentMode, CheckpointStore, ClusterTopology, CouchbaseCheckpointCollectionSpec,
+    CouchbaseCheckpointStore, CouchbaseKvCheckpointCollection, DcpClient, DcpConfig, DcpDelivery,
+    DcpHealth, DcpHealthStatus, DcpMetrics, DcpSubscription, DcpSubscriptionSpec,
+    FileCheckpointStore, RollbackMitigationConfig, TopologyNetwork,
 };
 
 fn assert_subscription_stream<S>()
@@ -32,5 +33,15 @@ fn umbrella_crate_exposes_the_tokio_client_lifecycle() {
     let _ = std::any::type_name::<RollbackMitigationConfig>();
     let _ = std::any::type_name::<ClusterTopology>();
     let _ = std::any::type_name::<TopologyNetwork>();
+    let _ = std::any::type_name::<CouchbaseCheckpointCollectionSpec>();
+    let _ = std::any::type_name::<CouchbaseKvCheckpointCollection>();
+    let _: fn(DcpConfig, String) -> rust_dcp::Result<CouchbaseCheckpointStore> =
+        CouchbaseCheckpointStore::from_config;
+    let _: fn(
+        DcpConfig,
+        CouchbaseCheckpointCollectionSpec,
+        String,
+    ) -> rust_dcp::Result<CouchbaseCheckpointStore> =
+        CouchbaseCheckpointStore::from_config_in_collection;
     assert_ne!(DcpHealthStatus::Starting, DcpHealthStatus::Stopped);
 }

@@ -485,6 +485,162 @@ pub fn delete_document(
     frame
 }
 
+/// Builds a collection-aware lookup for one document XATTR.
+///
+/// The request uses the multi-lookup wire form used by `gocbcore` and
+/// `go-dcp`, even though it contains exactly one operation.
+///
+/// # Errors
+///
+/// Returns a protocol error when `path` is empty or cannot fit in the
+/// protocol's unsigned 16-bit path-length field.
+pub fn subdoc_get_xattr(
+    key: impl AsRef<[u8]>,
+    path: &str,
+    collection_id: Option<u32>,
+    vbucket: u16,
+    opaque: u32,
+) -> Result<Frame> {
+    let path_len = subdoc_path_len(path)?;
+    let mut value = BytesMut::with_capacity(4 + path.len());
+    value.put_u8(0xc5); // SUBDOC_GET
+    value.put_u8(0x04); // XATTR_PATH
+    value.put_u16(path_len);
+    value.extend_from_slice(path.as_bytes());
+
+    let mut frame = Frame::request(Opcode::SUBDOC_MULTI_LOOKUP);
+    frame.key = Bytes::copy_from_slice(key.as_ref());
+    frame.value = value.freeze();
+    frame.collection_id = collection_id;
+    frame.vbucket = vbucket;
+    frame.opaque = opaque;
+    Ok(frame)
+}
+
+/// Builds a collection-aware mutation that creates the backing document when
+/// necessary and upserts one document XATTR.
+///
+/// # Errors
+///
+/// Returns a protocol error when `path` is empty, the path cannot fit in the
+/// unsigned 16-bit path-length field, or the value cannot fit in the unsigned
+/// 32-bit value-length field.
+pub fn subdoc_upsert_xattr(
+    key: impl AsRef<[u8]>,
+    path: &str,
+    xattr_value: impl Into<Bytes>,
+    collection_id: Option<u32>,
+    vbucket: u16,
+    opaque: u32,
+) -> Result<Frame> {
+    let path_len = subdoc_path_len(path)?;
+    let xattr_value = xattr_value.into();
+    let value_len = u32::try_from(xattr_value.len()).map_err(|_| {
+        ProtocolError::InvalidLength(format!(
+            "sub-document value length {} exceeds u32",
+            xattr_value.len()
+        ))
+    })?;
+    let capacity = 8_usize
+        .checked_add(path.len())
+        .and_then(|len| len.checked_add(xattr_value.len()))
+        .ok_or_else(|| {
+            ProtocolError::InvalidLength("sub-document mutation body length overflow".into())
+        })?;
+    let mut value = BytesMut::with_capacity(capacity);
+    value.put_u8(0xc8); // SUBDOC_DICT_SET
+    value.put_u8(0x04); // XATTR_PATH
+    value.put_u16(path_len);
+    value.put_u32(value_len);
+    value.extend_from_slice(path.as_bytes());
+    value.extend_from_slice(&xattr_value);
+
+    let mut frame = Frame::request(Opcode::SUBDOC_MULTI_MUTATION);
+    frame.extras = Bytes::from_static(&[0x01]); // MKDOC
+    frame.key = Bytes::copy_from_slice(key.as_ref());
+    frame.value = value.freeze();
+    frame.collection_id = collection_id;
+    frame.vbucket = vbucket;
+    frame.opaque = opaque;
+    Ok(frame)
+}
+
+/// Parses the result of [`subdoc_get_xattr`].
+///
+/// An absent document and an absent XATTR both return `Ok(None)`.
+///
+/// # Errors
+///
+/// Returns a protocol error for the wrong response opcode, an unexpected
+/// server status, or a response that does not contain exactly one complete
+/// multi-lookup result.
+pub fn parse_subdoc_get_xattr(frame: &Frame) -> Result<Option<Bytes>> {
+    ensure_response_opcode(frame, Opcode::SUBDOC_MULTI_LOOKUP)?;
+    if frame.status == Status::KEY_NOT_FOUND {
+        return Ok(None);
+    }
+    if !matches!(
+        frame.status,
+        Status::SUCCESS | Status::SUBDOC_MULTI_PATH_FAILURE
+    ) {
+        return Err(server_status(frame));
+    }
+    if frame.value.len() < 6 {
+        return Err(ProtocolError::MalformedFrame(format!(
+            "sub-document lookup result requires 6 header bytes, got {}",
+            frame.value.len()
+        )));
+    }
+    let status = Status(u16::from_be_bytes([frame.value[0], frame.value[1]]));
+    let value_len = u32::from_be_bytes([
+        frame.value[2],
+        frame.value[3],
+        frame.value[4],
+        frame.value[5],
+    ]) as usize;
+    let expected_len = 6_usize.checked_add(value_len).ok_or_else(|| {
+        ProtocolError::InvalidLength("sub-document lookup result length overflow".into())
+    })?;
+    if frame.value.len() != expected_len {
+        return Err(ProtocolError::MalformedFrame(format!(
+            "sub-document lookup result declares {value_len} value bytes but packet contains {}",
+            frame.value.len().saturating_sub(6)
+        )));
+    }
+    match status {
+        Status::SUCCESS => Ok(Some(frame.value.slice(6..))),
+        Status::SUBDOC_PATH_NOT_FOUND => Ok(None),
+        _ => Err(ProtocolError::ServerStatus {
+            status: status.as_u16(),
+            opcode: frame.opcode.as_u8(),
+            message: "sub-document XATTR lookup failed".into(),
+        }),
+    }
+}
+
+/// Validates a response to [`subdoc_upsert_xattr`].
+///
+/// # Errors
+///
+/// Returns a protocol error for the wrong opcode or a non-success status.
+pub fn parse_subdoc_mutation(frame: &Frame) -> Result<()> {
+    ensure_response(frame, Opcode::SUBDOC_MULTI_MUTATION)
+}
+
+fn subdoc_path_len(path: &str) -> Result<u16> {
+    if path.is_empty() {
+        return Err(ProtocolError::InvalidRequest(
+            "sub-document path must be non-empty".into(),
+        ));
+    }
+    u16::try_from(path.len()).map_err(|_| {
+        ProtocolError::InvalidLength(format!(
+            "sub-document path length {} exceeds u16",
+            path.len()
+        ))
+    })
+}
+
 /// Builds a DCP connection-open request.
 #[must_use]
 pub fn dcp_open(name: &str, flags: DcpOpenFlags, opaque: u32) -> Frame {
@@ -852,11 +1008,15 @@ fn ensure_success(frame: &Frame) -> Result<()> {
     if frame.status.is_success() {
         return Ok(());
     }
-    Err(ProtocolError::ServerStatus {
+    Err(server_status(frame))
+}
+
+fn server_status(frame: &Frame) -> ProtocolError {
+    ProtocolError::ServerStatus {
         status: frame.status.as_u16(),
         opcode: frame.opcode.as_u8(),
         message: String::from_utf8_lossy(&frame.value).into_owned(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1134,6 +1294,98 @@ mod tests {
         assert_eq!(delete.opcode, Opcode::DELETE);
         assert_eq!(delete.cas, 99);
         assert_eq!(delete.vbucket, 12);
+    }
+
+    #[test]
+    fn subdocument_xattr_requests_match_the_gocbcore_wire_contract() {
+        let get = subdoc_get_xattr(b"checkpoint", "cbgo", Some(0xcafe), 12, 7).unwrap();
+        assert_eq!(get.opcode, Opcode::SUBDOC_MULTI_LOOKUP);
+        assert_eq!(get.vbucket, 12);
+        assert_eq!(get.collection_id, Some(0xcafe));
+        assert_eq!(&get.key[..], b"checkpoint");
+        assert!(get.extras.is_empty());
+        assert_eq!(
+            &get.value[..],
+            &[0xc5, 0x04, 0x00, 0x04, b'c', b'b', b'g', b'o']
+        );
+        assert_eq!(get.opaque, 7);
+
+        let upsert = subdoc_upsert_xattr(
+            b"checkpoint",
+            "cbgo",
+            Bytes::from_static(br#"{"seqno":42}"#),
+            Some(0xcafe),
+            12,
+            8,
+        )
+        .unwrap();
+        assert_eq!(upsert.opcode, Opcode::SUBDOC_MULTI_MUTATION);
+        assert_eq!(&upsert.extras[..], &[0x01]);
+        assert_eq!(
+            &upsert.value[..],
+            &[
+                0xc8, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0c, b'c', b'b', b'g', b'o', b'{', b'"',
+                b's', b'e', b'q', b'n', b'o', b'"', b':', b'4', b'2', b'}',
+            ]
+        );
+        assert_eq!(upsert.opaque, 8);
+    }
+
+    #[test]
+    fn subdocument_xattr_request_rejects_unrepresentable_paths() {
+        assert!(subdoc_get_xattr(b"checkpoint", "", None, 0, 0).is_err());
+        assert!(subdoc_get_xattr(b"checkpoint", &"x".repeat(65_536), None, 0, 0).is_err());
+        assert!(subdoc_upsert_xattr(b"checkpoint", "", Bytes::new(), None, 0, 0).is_err());
+    }
+
+    #[test]
+    fn subdocument_xattr_lookup_distinguishes_missing_path_and_document() {
+        let mut found = Frame::response(Opcode::SUBDOC_MULTI_LOOKUP, Status::SUCCESS);
+        let mut value = BytesMut::new();
+        value.put_u16(Status::SUCCESS.as_u16());
+        value.put_u32(5);
+        value.extend_from_slice(b"value");
+        found.value = value.freeze();
+        assert_eq!(
+            parse_subdoc_get_xattr(&found).unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+
+        let missing_document = Frame::response(Opcode::SUBDOC_MULTI_LOOKUP, Status::KEY_NOT_FOUND);
+        assert_eq!(parse_subdoc_get_xattr(&missing_document).unwrap(), None);
+
+        let mut missing_path = Frame::response(
+            Opcode::SUBDOC_MULTI_LOOKUP,
+            Status::SUBDOC_MULTI_PATH_FAILURE,
+        );
+        let mut value = BytesMut::new();
+        value.put_u16(Status::SUBDOC_PATH_NOT_FOUND.as_u16());
+        value.put_u32(0);
+        missing_path.value = value.freeze();
+        assert_eq!(parse_subdoc_get_xattr(&missing_path).unwrap(), None);
+    }
+
+    #[test]
+    fn subdocument_xattr_response_validation_is_strict() {
+        let wrong_opcode = Frame::response(Opcode::GET, Status::SUCCESS);
+        assert!(parse_subdoc_get_xattr(&wrong_opcode).is_err());
+
+        let mut truncated = Frame::response(Opcode::SUBDOC_MULTI_LOOKUP, Status::SUCCESS);
+        truncated.value = Bytes::from_static(&[0x00, 0x00, 0x00]);
+        assert!(parse_subdoc_get_xattr(&truncated).is_err());
+
+        let mut trailing = Frame::response(Opcode::SUBDOC_MULTI_LOOKUP, Status::SUCCESS);
+        let mut value = BytesMut::new();
+        value.put_u16(Status::SUCCESS.as_u16());
+        value.put_u32(1);
+        value.extend_from_slice(b"xx");
+        trailing.value = value.freeze();
+        assert!(parse_subdoc_get_xattr(&trailing).is_err());
+
+        let success = Frame::response(Opcode::SUBDOC_MULTI_MUTATION, Status::SUCCESS);
+        parse_subdoc_mutation(&success).unwrap();
+        let failure = Frame::response(Opcode::SUBDOC_MULTI_MUTATION, Status::INVALID_ARGUMENTS);
+        assert!(parse_subdoc_mutation(&failure).is_err());
     }
 
     #[test]
