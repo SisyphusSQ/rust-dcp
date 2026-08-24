@@ -123,6 +123,8 @@ impl Opcode {
     pub const DCP_OSO_SNAPSHOT: Self = Self(0x65);
     /// Select a bucket on the current connection.
     pub const SELECT_BUCKET: Self = Self(0x89);
+    /// Read one vBucket's persisted and current sequence numbers.
+    pub const OBSERVE_SEQNO: Self = Self(0x91);
     /// Read the cluster configuration.
     pub const GET_CLUSTER_CONFIG: Self = Self(0xb5);
     /// Read the collection manifest.

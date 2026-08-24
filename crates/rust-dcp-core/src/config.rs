@@ -226,6 +226,59 @@ pub enum RollbackPolicy {
     DelegateToHandler,
 }
 
+/// Replica-persistence observation used to reduce the rollback window before
+/// events are delivered to the application.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackMitigationConfig {
+    /// Enables `OBSERVE_SEQNO` polling of the active and every available replica.
+    pub enabled: bool,
+    /// Delay between complete observation cycles.
+    #[serde(with = "humantime_serde")]
+    pub poll_interval: Duration,
+    /// Maximum duration of one node observation batch.
+    #[serde(with = "humantime_serde")]
+    pub request_timeout: Duration,
+    /// Maximum time one delivery may wait for the required persisted sequence
+    /// number before the stall fails explicitly.
+    #[serde(with = "humantime_serde")]
+    pub maximum_stall: Duration,
+}
+
+impl Default for RollbackMitigationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(5),
+            maximum_stall: Duration::from_secs(60),
+        }
+    }
+}
+
+impl RollbackMitigationConfig {
+    fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.poll_interval.is_zero()
+            || self.request_timeout.is_zero()
+            || self.maximum_stall.is_zero()
+        {
+            return Err(DcpError::InvalidConfiguration(
+                "enabled rollback mitigation intervals must be greater than zero".into(),
+            ));
+        }
+        if self.maximum_stall <= self.request_timeout || self.maximum_stall <= self.poll_interval {
+            return Err(DcpError::InvalidConfiguration(
+                "rollback mitigation maximum stall must exceed its request timeout and poll interval"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Server-side collection filter.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,6 +512,8 @@ pub struct DcpConfig {
     pub checkpoint: CheckpointConfig,
     /// Explicit rollback policy.
     pub rollback_policy: RollbackPolicy,
+    /// Replica-persistence gate applied before application delivery.
+    pub rollback_mitigation: RollbackMitigationConfig,
     /// DCP stream priority.
     pub priority: DcpPriority,
     /// Disables Couchbase 7.2+ Change Streams.
@@ -488,6 +543,7 @@ impl DcpConfig {
                 flow_control: FlowControlConfig::default(),
                 checkpoint: CheckpointConfig::default(),
                 rollback_policy: RollbackPolicy::default(),
+                rollback_mitigation: RollbackMitigationConfig::default(),
                 priority: DcpPriority::default(),
                 disable_change_streams: false,
                 connect_timeout: Duration::from_secs(60),
@@ -538,6 +594,7 @@ impl DcpConfig {
         self.collections.validate()?;
         self.flow_control.validate()?;
         self.checkpoint.validate()?;
+        self.rollback_mitigation.validate()?;
         self.health_check.validate()?;
         Ok(())
     }
@@ -600,6 +657,13 @@ impl DcpConfigBuilder {
     #[must_use]
     pub const fn rollback_policy(mut self, policy: RollbackPolicy) -> Self {
         self.config.rollback_policy = policy;
+        self
+    }
+
+    /// Replaces replica-persistence rollback mitigation settings.
+    #[must_use]
+    pub fn rollback_mitigation(mut self, mitigation: RollbackMitigationConfig) -> Self {
+        self.config.rollback_mitigation = mitigation;
         self
     }
 
@@ -676,11 +740,44 @@ mod tests {
         assert_eq!(config.mode, DcpMode::Infinite);
         assert_eq!(config.collections, CollectionFilter::default());
         assert_eq!(config.rollback_policy, RollbackPolicy::StopAndReport);
+        assert!(config.rollback_mitigation.enabled);
+        assert_eq!(
+            config.rollback_mitigation.poll_interval,
+            Duration::from_secs(1)
+        );
         assert_eq!(config.network, crate::TopologyNetwork::Auto);
         assert_eq!(
             config.seeds[0].with_default_kv_port(false),
             "cb.example.test:11210"
         );
+    }
+
+    #[test]
+    fn enabled_rollback_mitigation_requires_bounded_nonzero_intervals() {
+        let mut config = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+            .seed("cb.example.test")
+            .unwrap()
+            .build()
+            .unwrap();
+        config.rollback_mitigation.poll_interval = Duration::ZERO;
+        assert!(config.validate().is_err());
+
+        config.rollback_mitigation.enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rollback_mitigation_stall_must_allow_another_poll_cycle() {
+        let mut config = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+            .seed("cb.example.test")
+            .unwrap()
+            .build()
+            .unwrap();
+        config.rollback_mitigation.poll_interval = Duration::from_secs(2);
+        config.rollback_mitigation.request_timeout = Duration::from_millis(5);
+        config.rollback_mitigation.maximum_stall = Duration::from_secs(1);
+
+        assert!(config.validate().is_err());
     }
 
     #[test]

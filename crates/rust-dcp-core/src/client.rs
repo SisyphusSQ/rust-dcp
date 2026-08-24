@@ -18,6 +18,7 @@ use tokio::{
     time,
 };
 
+use crate::rollback_mitigation::{RollbackMitigator, mitigation_position, spawn_tokio_mitigator};
 use crate::{
     AckOutcome, AssignmentMode, CheckpointCoordinator, CheckpointFlushReport, CheckpointMetrics,
     CheckpointStore, ClusterTopology, CollectionRegistry, CollectionRegistryStatus,
@@ -61,6 +62,7 @@ struct OpenedGeneration {
     end_seqnos: BTreeMap<u16, u64>,
     registry: CollectionRegistry,
     rollback_count: usize,
+    mitigation: Option<RollbackMitigator>,
 }
 
 trait ClientBackend: Send + Sync {
@@ -182,12 +184,21 @@ async fn open_tokio_generation(request: OpenGenerationRequest) -> Result<OpenedG
         shutdown_stream_vec(streams).await;
         return Err(error);
     }
+    let mitigation =
+        match spawn_tokio_mitigator(&request.config, &request.topology, &effective_checkpoints) {
+            Ok(mitigation) => mitigation,
+            Err(error) => {
+                shutdown_stream_vec(streams).await;
+                return Err(error);
+            }
+        };
     Ok(OpenedGeneration {
         streams,
         effective_checkpoints,
         end_seqnos,
         registry: CollectionRegistry::new(selection),
         rollback_count,
+        mitigation,
     })
 }
 
@@ -453,6 +464,13 @@ async fn shutdown_stream_vec(streams: Vec<Box<dyn ManagedNodeStream>>) {
         if let Err(error) = stream.shutdown().await {
             tracing::warn!(%error, "failed to shut down a partially opened DCP stream");
         }
+    }
+}
+
+async fn close_mitigation(mitigation: Option<RollbackMitigator>) -> Result<()> {
+    match mitigation {
+        Some(mitigation) => mitigation.close().await,
+        None => Ok(()),
     }
 }
 
@@ -880,6 +898,7 @@ impl DcpClient {
             opened.streams.len(),
         ) {
             shutdown_stream_vec(opened.streams).await;
+            let _ = close_mitigation(opened.mitigation).await;
             return Err(error);
         }
         let OpenedGeneration {
@@ -888,6 +907,7 @@ impl DcpClient {
             end_seqnos,
             registry,
             rollback_count,
+            mitigation,
         } = opened;
         let coordinator = match CheckpointCoordinator::new(
             self.inner.config.checkpoint.clone(),
@@ -899,6 +919,7 @@ impl DcpClient {
             Ok(coordinator) => coordinator,
             Err(error) => {
                 shutdown_stream_vec(streams).await;
+                let _ = close_mitigation(mitigation).await;
                 return Err(error);
             }
         };
@@ -906,6 +927,7 @@ impl DcpClient {
             mark_changed_initial_positions(&coordinator, &loaded, &effective_checkpoints)
         {
             shutdown_stream_vec(streams).await;
+            let _ = close_mitigation(mitigation).await;
             let _ = coordinator.shutdown().await;
             return Err(error);
         }
@@ -918,6 +940,7 @@ impl DcpClient {
             end_seqnos,
             registry,
             rollback_count,
+            mitigation,
         })
     }
 
@@ -935,6 +958,7 @@ impl DcpClient {
             end_seqnos,
             registry,
             rollback_count,
+            mitigation,
         } = prepared;
         let registry = Arc::new(Mutex::new(registry));
         let current_generation = Arc::new(AtomicU64::new(1));
@@ -973,6 +997,7 @@ impl DcpClient {
             global_cancel: self.inner.cancel.subscribe(),
             local_cancel: cancel_receiver,
             active_subscription: Arc::clone(&self.inner.active_subscription),
+            mitigation,
         };
         let (completion_sender, completion_receiver) = watch::channel(None);
         let join = tokio::spawn(async move {
@@ -1193,11 +1218,13 @@ struct PreparedSubscription {
     end_seqnos: BTreeMap<u16, u64>,
     registry: CollectionRegistry,
     rollback_count: usize,
+    mitigation: Option<RollbackMitigator>,
 }
 
 impl PreparedSubscription {
     async fn discard(self) {
         shutdown_stream_vec(self.streams).await;
+        let _ = close_mitigation(self.mitigation).await;
     }
 }
 
@@ -1221,6 +1248,7 @@ struct SubscriptionRuntime {
     global_cancel: watch::Receiver<bool>,
     local_cancel: watch::Receiver<bool>,
     active_subscription: Arc<AtomicBool>,
+    mitigation: Option<RollbackMitigator>,
 }
 
 fn resolve_assignment(
@@ -1442,7 +1470,9 @@ async fn run_subscription(
     let mut terminal_error = None;
     loop {
         let action = drive_generation(&mut runtime, &mut streams).await;
-        let shutdown_result = shutdown_selected_streams(streams).await;
+        let stream_shutdown = shutdown_selected_streams(streams).await;
+        let mitigation_shutdown = close_mitigation(runtime.mitigation.take()).await;
+        let shutdown_result = combine_generation_shutdown(stream_shutdown, mitigation_shutdown);
         runtime.metrics.set_active_connections(0);
         match action {
             GenerationAction::Stop | GenerationAction::Complete => {
@@ -1624,6 +1654,9 @@ async fn handle_stream_item(
 ) -> Option<GenerationAction> {
     let output = match item {
         Ok(DcpStreamItem::Event(event)) => {
+            if let Some(action) = wait_for_mitigation(runtime, &event).await {
+                return Some(action);
+            }
             let registry = match lock_registry(&runtime.registry) {
                 Ok(registry) => registry.clone(),
                 Err(error) => return Some(GenerationAction::Fatal(error)),
@@ -1689,6 +1722,60 @@ async fn handle_stream_item(
         OutputDisposition::Sent => None,
         OutputDisposition::Stop => Some(GenerationAction::Stop),
         OutputDisposition::Reopen(snapshot) => Some(GenerationAction::Reopen(snapshot)),
+    }
+}
+
+async fn wait_for_mitigation(
+    runtime: &mut SubscriptionRuntime,
+    event: &DcpEvent,
+) -> Option<GenerationAction> {
+    let (vbucket, seqno) = mitigation_position(event)?;
+    let mitigation = runtime.mitigation.as_mut()?;
+    if *runtime.global_cancel.borrow() || *runtime.local_cancel.borrow() {
+        return Some(GenerationAction::Stop);
+    }
+    let latest = runtime.topology_receiver.borrow().clone();
+    if latest.generation > runtime.topology_snapshot.generation {
+        return Some(GenerationAction::Reopen(latest));
+    }
+
+    let mut global_cancel = runtime.global_cancel.clone();
+    let mut local_cancel = runtime.local_cancel.clone();
+    let mut topology = runtime.topology_receiver.clone();
+    let wait = mitigation.wait_until_safe(vbucket, seqno);
+    tokio::select! {
+        biased;
+        changed = global_cancel.changed() => {
+            let _ = changed;
+            Some(GenerationAction::Stop)
+        }
+        changed = local_cancel.changed() => {
+            let _ = changed;
+            Some(GenerationAction::Stop)
+        }
+        changed = topology.changed() => {
+            if changed.is_ok() {
+                let snapshot = topology.borrow().clone();
+                if snapshot.generation > runtime.topology_snapshot.generation {
+                    return Some(GenerationAction::Reopen(snapshot));
+                }
+            }
+            Some(GenerationAction::Reconnect)
+        }
+        result = wait => match result {
+            Ok(delayed) => {
+                if delayed {
+                    runtime.metrics.record_rollback_mitigation_delay();
+                    tracing::debug!(vbucket, seqno, "rollback mitigation released a persisted delivery");
+                }
+                None
+            }
+            Err(error) => {
+                runtime.metrics.record_rollback_mitigation_failure();
+                runtime.health.record_failure(SystemTime::now(), error.to_string());
+                Some(GenerationAction::Fatal(error))
+            }
+        },
     }
 }
 
@@ -1857,6 +1944,7 @@ async fn accept_reopened_generation(
         opened.streams.len(),
     ) {
         shutdown_stream_vec(opened.streams).await;
+        let _ = close_mitigation(opened.mitigation).await;
         return ReopenDisposition::Fatal(error);
     }
     if let Err(error) = runtime
@@ -1864,10 +1952,12 @@ async fn accept_reopened_generation(
         .rebase_partitions(&opened.effective_checkpoints)
     {
         shutdown_stream_vec(opened.streams).await;
+        let _ = close_mitigation(opened.mitigation).await;
         return ReopenDisposition::Fatal(error);
     }
     if let Err(error) = replace_registry(&runtime.registry, opened.registry) {
         shutdown_stream_vec(opened.streams).await;
+        let _ = close_mitigation(opened.mitigation).await;
         return ReopenDisposition::Fatal(error);
     }
     let connection_count = u64::try_from(opened.streams.len()).unwrap_or(u64::MAX);
@@ -1877,12 +1967,24 @@ async fn accept_reopened_generation(
         .health
         .record_success(SystemTime::now(), connection_count, snapshot.generation);
     runtime.topology_snapshot = snapshot;
+    runtime.mitigation = opened.mitigation;
     tracing::info!(
         connection_generation = generation,
         active_connections = opened.streams.len(),
         "opened a new DCP connection generation"
     );
     ReopenDisposition::Opened(opened.streams)
+}
+
+fn combine_generation_shutdown(streams: Result<()>, mitigation: Result<()>) -> Result<()> {
+    match (streams, mitigation) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(mitigation_error)) => {
+            tracing::warn!(%mitigation_error, "rollback mitigation also failed during generation shutdown");
+            Err(error)
+        }
+    }
 }
 
 async fn shutdown_selected_streams(streams: SelectAll<Box<dyn ManagedNodeStream>>) -> Result<()> {
@@ -1927,6 +2029,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::rollback_mitigation::{
+        MitigationSource, MitigationSourceFuture, ObservationBatch, ObservationOutcome,
+        RollbackMitigator,
+    };
     use crate::{
         CheckpointConfig, CheckpointMode, CheckpointStoreFuture, ClusterTopology, CollectionFilter,
         CollectionManifest, CollectionRegistry, CollectionRegistryStatus, Credentials,
@@ -1957,6 +2063,39 @@ mod tests {
     struct MemoryStore {
         checkpoints: Mutex<BTreeMap<u16, DcpCheckpoint>>,
         save_calls: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct ManualMitigationSource {
+        observations: Mutex<ObservationBatch>,
+    }
+
+    impl ManualMitigationSource {
+        fn set_persisted(&self, vbucket: u16, vbucket_uuid: u64, persisted_seqno: u64) {
+            self.observations.lock().unwrap().insert(
+                vbucket,
+                ObservationOutcome::Persisted {
+                    vbucket_uuid,
+                    persisted_seqno,
+                },
+            );
+        }
+
+        fn set_branch_changed(&self, vbucket: u16, observed_vbucket_uuid: u64) {
+            self.observations.lock().unwrap().insert(
+                vbucket,
+                ObservationOutcome::BranchChanged {
+                    observed_vbucket_uuid,
+                },
+            );
+        }
+    }
+
+    impl MitigationSource for ManualMitigationSource {
+        fn observe(&self) -> MitigationSourceFuture<'_> {
+            let observations = self.observations.lock().unwrap().clone();
+            Box::pin(async move { observations })
+        }
     }
 
     impl CheckpointStore for MemoryStore {
@@ -2244,6 +2383,7 @@ mod tests {
                 end_seqnos: BTreeMap::from([(0, end_seqno)]),
                 registry: registry(),
                 rollback_count: 0,
+                mitigation: None,
             },
             sender,
             shutdowns,
@@ -2334,6 +2474,142 @@ mod tests {
         subscription.close().await.unwrap();
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
         client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscription_does_not_deliver_before_rollback_mitigation_is_persisted() {
+        let source = Arc::new(ManualMitigationSource::default());
+        source.set_persisted(0, 11, 0);
+        let mitigation = RollbackMitigator::spawn(
+            crate::RollbackMitigationConfig {
+                enabled: true,
+                poll_interval: Duration::from_millis(1),
+                request_timeout: Duration::from_millis(10),
+                maximum_stall: Duration::from_secs(1),
+            },
+            source.clone(),
+            BTreeMap::from([(0, 11)]),
+        )
+        .unwrap();
+        let (mut generation, sender, _shutdowns) = opened_generation(checkpoint(0, 11));
+        generation.mitigation = Some(mitigation);
+        let backend = Arc::new(FakeBackend::new([Ok(topology(7))], [Ok(generation)]));
+        let client = DcpClient::connect_with_backend(
+            config(StartPosition::Earliest),
+            backend as Arc<dyn ClientBackend>,
+        )
+        .await
+        .unwrap();
+        let mut subscription = client
+            .subscribe(DcpSubscriptionSpec::standalone(Arc::new(
+                MemoryStore::default(),
+            )))
+            .await
+            .unwrap();
+
+        sender.send(Ok(snapshot(0, 1))).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), subscription.next())
+                .await
+                .is_err()
+        );
+        source.set_persisted(0, 11, 1);
+        let delivery = next_delivery(&mut subscription).await;
+        assert!(matches!(delivery.event(), DcpEvent::SnapshotMarker(_)));
+        assert_eq!(client.metrics().snapshot().rollback_mitigation_delays, 1);
+
+        subscription.close().await.unwrap();
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscription_close_cancels_a_rollback_mitigation_wait() {
+        let source = Arc::new(ManualMitigationSource::default());
+        source.set_persisted(0, 11, 0);
+        let mitigation = RollbackMitigator::spawn(
+            crate::RollbackMitigationConfig {
+                enabled: true,
+                poll_interval: Duration::from_millis(1),
+                request_timeout: Duration::from_millis(10),
+                maximum_stall: Duration::from_secs(10),
+            },
+            source,
+            BTreeMap::from([(0, 11)]),
+        )
+        .unwrap();
+        let (mut generation, sender, shutdowns) = opened_generation(checkpoint(0, 11));
+        generation.mitigation = Some(mitigation);
+        let backend = Arc::new(FakeBackend::new([Ok(topology(7))], [Ok(generation)]));
+        let client = DcpClient::connect_with_backend(
+            config(StartPosition::Earliest),
+            backend as Arc<dyn ClientBackend>,
+        )
+        .await
+        .unwrap();
+        let mut subscription = client
+            .subscribe(DcpSubscriptionSpec::standalone(Arc::new(
+                MemoryStore::default(),
+            )))
+            .await
+            .unwrap();
+
+        sender.send(Ok(snapshot(0, 1))).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), subscription.next())
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_millis(250), subscription.close())
+            .await
+            .expect("subscription close must cancel mitigation before maximum_stall")
+            .unwrap();
+
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(client.metrics().snapshot().rollback_mitigation_failures, 0);
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollback_mitigation_stall_is_reported_instead_of_reconnecting_forever() {
+        let source = Arc::new(ManualMitigationSource::default());
+        source.set_branch_changed(0, 22);
+        let mitigation = RollbackMitigator::spawn(
+            crate::RollbackMitigationConfig {
+                enabled: true,
+                poll_interval: Duration::from_millis(1),
+                request_timeout: Duration::from_millis(5),
+                maximum_stall: Duration::from_millis(30),
+            },
+            source,
+            BTreeMap::from([(0, 11)]),
+        )
+        .unwrap();
+        let (mut generation, sender, _shutdowns) = opened_generation(checkpoint(0, 11));
+        generation.mitigation = Some(mitigation);
+        let backend = Arc::new(FakeBackend::new([Ok(topology(7))], [Ok(generation)]));
+        let client = DcpClient::connect_with_backend(
+            config(StartPosition::Earliest),
+            backend as Arc<dyn ClientBackend>,
+        )
+        .await
+        .unwrap();
+        let mut subscription = client
+            .subscribe(DcpSubscriptionSpec::standalone(Arc::new(
+                MemoryStore::default(),
+            )))
+            .await
+            .unwrap();
+
+        sender.send(Ok(snapshot(0, 1))).unwrap();
+        let error = tokio::time::timeout(Duration::from_millis(250), subscription.next())
+            .await
+            .expect("bounded mitigation must surface an error")
+            .expect("the subscription must yield the mitigation error")
+            .unwrap_err();
+
+        assert!(matches!(error, DcpError::RollbackMitigation { .. }));
+        assert_eq!(client.metrics().snapshot().rollback_mitigation_failures, 1);
+        let _ = client.close().await;
     }
 
     #[tokio::test]

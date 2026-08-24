@@ -6,7 +6,7 @@ use futures_util::Stream;
 use rust_dcp::{
     AssignmentMode, CheckpointStore, ClusterTopology, DcpClient, DcpDelivery, DcpHealth,
     DcpHealthStatus, DcpMetrics, DcpSubscription, DcpSubscriptionSpec, FileCheckpointStore,
-    TopologyNetwork,
+    RollbackMitigationConfig, TopologyNetwork,
 };
 
 fn assert_subscription_stream<S>()
@@ -29,6 +29,7 @@ fn umbrella_crate_exposes_the_tokio_client_lifecycle() {
     let _ = std::any::type_name::<DcpDelivery>();
     let _ = std::any::type_name::<DcpHealth>();
     let _ = std::any::type_name::<DcpMetrics>();
+    let _ = std::any::type_name::<RollbackMitigationConfig>();
     let _ = std::any::type_name::<ClusterTopology>();
     let _ = std::any::type_name::<TopologyNetwork>();
     assert_ne!(DcpHealthStatus::Starting, DcpHealthStatus::Stopped);

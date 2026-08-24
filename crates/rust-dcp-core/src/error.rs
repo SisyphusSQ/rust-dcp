@@ -76,6 +76,15 @@ pub enum DcpError {
         failover_log: Vec<FailoverEntry>,
     },
 
+    /// Replica persistence could not safely cover a pending delivery.
+    #[error("rollback mitigation failed for vBucket {vbucket}: {message}")]
+    RollbackMitigation {
+        /// Affected vBucket.
+        vbucket: u16,
+        /// Observation, history-branch, or bounded-stall context.
+        message: String,
+    },
+
     /// Work from an obsolete assignment generation was observed.
     #[error("stale assignment generation {observed}; current generation is {current}")]
     StaleGeneration {

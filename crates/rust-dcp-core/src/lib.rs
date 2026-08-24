@@ -14,6 +14,7 @@ mod config;
 mod error;
 mod event;
 mod observability;
+mod rollback_mitigation;
 mod stream;
 mod topology;
 mod transport;
@@ -42,8 +43,8 @@ pub use collections::{
 };
 pub use config::{
     CheckpointConfig, CheckpointMode, CollectionFilter, Credentials, DcpConfig, DcpConfigBuilder,
-    DcpMode, DcpPriority, FlowControlConfig, HealthCheckConfig, RollbackPolicy, SeedAddress,
-    StartPosition, TlsConfig,
+    DcpMode, DcpPriority, FlowControlConfig, HealthCheckConfig, RollbackMitigationConfig,
+    RollbackPolicy, SeedAddress, StartPosition, TlsConfig,
 };
 pub use error::{DcpError, Result};
 pub use event::{
