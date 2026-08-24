@@ -309,12 +309,22 @@ impl FlowControlConfig {
                 "connection buffer size must be greater than zero".into(),
             ));
         }
+        if self.connection_buffer_size > u32::MAX as usize {
+            return Err(DcpError::InvalidConfiguration(
+                "connection buffer size must fit in the server's 32-bit control value".into(),
+            ));
+        }
         if !(0.0..=1.0).contains(&self.ack_ratio) || self.ack_ratio == 0.0 {
             return Err(DcpError::InvalidConfiguration(
                 "flow-control ack ratio must be in (0, 1]".into(),
             ));
         }
-        if self.noop_interval.is_zero() || self.dead_connection_timeout <= self.noop_interval {
+        if self.noop_interval < Duration::from_secs(1) {
+            return Err(DcpError::InvalidConfiguration(
+                "NOOP interval must be at least one second".into(),
+            ));
+        }
+        if self.dead_connection_timeout <= self.noop_interval {
             return Err(DcpError::InvalidConfiguration(
                 "dead connection timeout must be greater than the NOOP interval".into(),
             ));
@@ -659,5 +669,23 @@ mod tests {
     fn invalid_explicit_seed_port_is_rejected() {
         assert!("cb.example.test:70000".parse::<SeedAddress>().is_err());
         assert!("[2001:db8::1]:0".parse::<SeedAddress>().is_err());
+    }
+
+    #[test]
+    fn server_control_bounds_are_validated_before_bootstrap() {
+        let too_short = FlowControlConfig {
+            noop_interval: Duration::from_millis(999),
+            ..FlowControlConfig::default()
+        };
+        assert!(too_short.validate().is_err());
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let too_large = FlowControlConfig {
+                connection_buffer_size: u32::MAX as usize + 1,
+                ..FlowControlConfig::default()
+            };
+            assert!(too_large.validate().is_err());
+        }
     }
 }

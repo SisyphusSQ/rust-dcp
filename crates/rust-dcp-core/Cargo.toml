@@ -8,10 +8,25 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
 humantime-serde.workspace = true
+pbkdf2.workspace = true
+rust-dcp-protocol = { path = "../rust-dcp-protocol", version = "0.1.0" }
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

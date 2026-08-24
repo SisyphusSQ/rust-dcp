@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{FailoverEntry, Frame, FramingExtra, Opcode, ProtocolError, Result, Status};
 
 /// Features advertised through the Memcached `HELLO` command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u16)]
 pub enum HelloFeature {
     /// Datatype byte support.
