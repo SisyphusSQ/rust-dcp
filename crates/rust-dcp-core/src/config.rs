@@ -2,7 +2,7 @@ use std::{fmt, net::Ipv6Addr, num::NonZeroUsize, path::PathBuf, str::FromStr, ti
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DcpError, Result};
+use crate::{DcpError, Result, TopologyNetwork};
 
 const DEFAULT_KV_PORT: u16 = 11_210;
 const DEFAULT_KV_TLS_PORT: u16 = 11_207;
@@ -422,6 +422,22 @@ impl Default for HealthCheckConfig {
     }
 }
 
+impl HealthCheckConfig {
+    fn validate(&self) -> Result<()> {
+        if self.enabled && self.interval.is_zero() {
+            return Err(DcpError::InvalidConfiguration(
+                "health-check interval must be greater than zero".into(),
+            ));
+        }
+        if self.enabled && self.timeout.is_zero() {
+            return Err(DcpError::InvalidConfiguration(
+                "health-check timeout must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Complete configuration for one DCP client.
 #[derive(Clone, Debug)]
 pub struct DcpConfig {
@@ -451,6 +467,8 @@ pub struct DcpConfig {
     pub connect_timeout: Duration,
     /// TLS settings.
     pub tls: TlsConfig,
+    /// CCCP address set used for node connections.
+    pub network: TopologyNetwork,
     /// Health-check settings.
     pub health_check: HealthCheckConfig,
 }
@@ -474,6 +492,7 @@ impl DcpConfig {
                 disable_change_streams: false,
                 connect_timeout: Duration::from_secs(60),
                 tls: TlsConfig::default(),
+                network: TopologyNetwork::default(),
                 health_check: HealthCheckConfig::default(),
             },
         }
@@ -519,6 +538,7 @@ impl DcpConfig {
         self.collections.validate()?;
         self.flow_control.validate()?;
         self.checkpoint.validate()?;
+        self.health_check.validate()?;
         Ok(())
     }
 }
@@ -604,6 +624,13 @@ impl DcpConfigBuilder {
         self
     }
 
+    /// Selects the CCCP address set used for node connections.
+    #[must_use]
+    pub fn network(mut self, network: TopologyNetwork) -> Self {
+        self.config.network = network;
+        self
+    }
+
     /// Builds and validates the configuration.
     ///
     /// # Errors
@@ -649,10 +676,46 @@ mod tests {
         assert_eq!(config.mode, DcpMode::Infinite);
         assert_eq!(config.collections, CollectionFilter::default());
         assert_eq!(config.rollback_policy, RollbackPolicy::StopAndReport);
+        assert_eq!(config.network, crate::TopologyNetwork::Auto);
         assert_eq!(
             config.seeds[0].with_default_kv_port(false),
             "cb.example.test:11210"
         );
+    }
+
+    #[test]
+    fn builder_selects_the_requested_topology_network() {
+        let config = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+            .seed("cb.example.test")
+            .expect("seed is valid")
+            .network(crate::TopologyNetwork::External)
+            .build()
+            .expect("config is valid");
+
+        assert_eq!(config.network, crate::TopologyNetwork::External);
+    }
+
+    #[test]
+    fn validation_rejects_zero_enabled_health_check_bounds() {
+        let mut config = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+            .seed("cb.example.test")
+            .expect("seed is valid")
+            .build()
+            .expect("config is initially valid");
+
+        config.health_check.interval = Duration::ZERO;
+        assert!(matches!(
+            config.validate(),
+            Err(DcpError::InvalidConfiguration(_))
+        ));
+        config.health_check.interval = Duration::from_secs(1);
+        config.health_check.timeout = Duration::ZERO;
+        assert!(matches!(
+            config.validate(),
+            Err(DcpError::InvalidConfiguration(_))
+        ));
+        config.health_check.enabled = false;
+        assert!(config.validate().is_ok());
     }
 
     #[test]
