@@ -14,6 +14,7 @@ The frozen first-release feature scope is implemented and covered by determinist
 - CCCP topology discovery, active-vBucket routing, failover logs, high sequence numbers, topology refresh, and stream reopen;
 - DCP flow control, NOOP handling, dead-connection detection, bounded queues, and generation fencing;
 - manual or automatic per-vBucket checkpoints backed by a file, Couchbase XATTR documents, noop/read-only adapters, or a custom async store;
+- optional official Couchbase Rust SDK adapters for modern-server checkpoint XATTR and membership KV/CAS operations, without replacing the DCP transport;
 - explicit rollback policy and active-plus-replica persistence rollback mitigation;
 - DCP priority, optional Couchbase Change Streams, Snappy decompression, datatype flags, and raw XATTR framing;
 - standalone or externally fenced assignments, with optional Couchbase and Kubernetes membership crates;
@@ -107,6 +108,7 @@ Skipped document events still pass rollback mitigation and are internally acknow
 - `FileCheckpointStore` atomically replaces a go-dcp-compatible JSON file.
 - `CouchbaseCheckpointStore::from_config` uses the built-in Tokio KV/XATTR adapter and go-dcp v1.3.1 metadata keys, XATTR name, and document schema.
 - `CouchbaseCheckpointStore::from_config_in_collection` places metadata in a named scope and collection.
+- `CouchbaseSdkCheckpointCollection` in `rust-dcp-couchbase-sdk` lets a caller reuse an official SDK `Collection` for checkpoint XATTR operations on server/toolchain combinations supported by that SDK.
 - `NoopCheckpointStore` always starts from the configured fallback and accepts save/clear calls without persistence.
 - `ReadOnlyCheckpointStore` loads from a wrapped store but suppresses save/clear, so replay/debug sessions cannot alter the source checkpoint.
 - Implement `CheckpointStore` for a fully custom asynchronous backend, or implement `CouchbaseCheckpointCollection` to reuse the go-dcp-compatible Couchbase metadata policy with another KV adapter.
@@ -122,6 +124,7 @@ Noop and read-only modes deliberately do not retain new progress across restarts
 Optional coordination runtimes are separate crates:
 
 - `rust-dcp-membership-couchbase`: CAS-fenced registry, heartbeats, stale-member pruning, and deterministic rebalance, with a built-in Tokio KV store;
+- `rust-dcp-couchbase-sdk`: optional official SDK `Collection` adapter for the Couchbase membership registry on modern supported servers;
 - `rust-dcp-membership-kubernetes`: StatefulSet ordinal assignment or a Tokio Kubernetes Pod watcher with UID fencing and ready/running membership rules.
 
 Membership updates produce assignments; the integrating application owns subscription replacement at an assignment boundary.
@@ -151,6 +154,7 @@ The collector emits `rust_dcp_*` counters and gauges for bootstrap, topology, re
 | Crate | Responsibility |
 |---|---|
 | `rust-dcp` | Umbrella public API |
+| `rust-dcp-couchbase-sdk` | Official Couchbase Rust SDK adapters for checkpoint XATTR and membership KV/CAS metadata operations; no DCP transport |
 | `rust-dcp-core` | Tokio transport, topology, stream lifecycle, checkpoints, rollback, collections, and client API |
 | `rust-dcp-protocol` | Memcached/DCP framing, commands, parsers, and event codecs |
 | `rust-dcp-prometheus` | Standard Prometheus `Collector` over live SDK metrics and health handles; no HTTP server |
@@ -163,9 +167,9 @@ The SDK owns Couchbase protocol, topology, and stream correctness. The applicati
 
 The behavioral baseline is [go-dcp v1.3.1](https://github.com/Trendyol/go-dcp/tree/v1.3.1), with low-level wire behavior checked against [gocbcore v10.7.1](https://github.com/couchbase/gocbcore/tree/v10.7.1).
 
-See [docs/compatibility.md](docs/compatibility.md) for feature-by-feature behavior, intentional differences, Server capability gates, deterministic validation evidence, and the deferred live E2E matrix.
+See [docs/compatibility.md](docs/compatibility.md) for feature-by-feature behavior, intentional differences, Server capability gates, deterministic validation evidence, and the deferred live E2E matrix. The versioned decision about what can safely reuse `couchbase-rs` is documented in [docs/official-sdk-boundary.md](docs/official-sdk-boundary.md).
 
-The workspace requires Rust 1.85 or newer and uses the 2024 edition.
+The base DCP/protocol/membership crates require Rust 1.85 or newer and use the 2024 edition. The optional `rust-dcp-couchbase-sdk` crate declares Rust 1.90 because the official Couchbase Rust SDK 1.0 support policy starts at Rust 1.90.
 
 ## Status
 

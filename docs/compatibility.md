@@ -11,6 +11,18 @@ This document separates implemented behavior from live deployment claims. The co
 
 An “implemented” row is not a claim that every listed Couchbase Server release has passed live certification.
 
+## Core and metadata backend boundary
+
+The base DCP path remains implemented on Tokio so the go-dcp-compatible Server 5.x–7.2 target is not narrowed. The official Couchbase Rust SDK 1.0 currently supports Rust 1.90+ and Couchbase Server 7.6–8.0; it marks Server 7.0–7.2 unsupported. Therefore official SDK reuse is isolated to the optional `rust-dcp-couchbase-sdk` metadata adapter crate and does not replace `rust-dcp-core` or `rust-dcp-protocol`.
+
+| Path | Implementation | Declared toolchain/server boundary |
+|---|---|---|
+| DCP wire, bootstrap, topology, streaming, reconnect, rollback | `rust-dcp-protocol` + Tokio `rust-dcp-core` | Rust 1.85; Server 5.x and later behavioral target; live version certification deferred |
+| Legacy checkpoint XATTR and membership KV/CAS | Built-in Tokio adapters | Preserves Server 5.x–7.2 paths; capability-gated; live E2E deferred |
+| Modern checkpoint XATTR and membership KV/CAS | `rust-dcp-couchbase-sdk` over official `couchbase 1.0.2` `Collection` | Rust 1.90; use only within the official SDK server support matrix; live adapter E2E deferred |
+
+See [official SDK reuse boundary](official-sdk-boundary.md) for the audited API gaps, backend selection, and the acceptance gate for any future DCP replacement.
+
 ## Behavioral compatibility
 
 | Area | go-dcp v1.3.1 baseline | rust-dcp behavior | Status and boundary |
@@ -42,13 +54,13 @@ An “implemented” row is not a claim that every listed Couchbase Server relea
 | Change Streams | Enabled by default unless disabled; relevant to Server 7.2+ Magma history | Optional `change_streams=true` control, enabled by default when accepted and explicitly disableable | Capability-gated and unit-tested; Server 7.2+ live E2E deferred |
 | Checkpoint progression | Per-vBucket checkpoint and interval/manual modes | Only contiguous events marked processed can advance a checkpoint; automatic Tokio scheduler or explicit `flush` makes it durable | Implemented and unit-tested |
 | File checkpoint | File metadata backend | Atomic fsync/rename, go-dcp-compatible JSON schema, bucket UUID checks, and malformed-file errors | Implemented and unit-tested |
-| Couchbase checkpoint | `_connector:cbgo:{group}:checkpoint:{vb}` document with `cbgo` XATTR | Same key, XATTR, and JSON schema; built-in Tokio KV routing supports default or named collection and idempotent delete | Implemented and unit-tested; live KV/XATTR E2E deferred |
+| Couchbase checkpoint | `_connector:cbgo:{group}:checkpoint:{vb}` document with `cbgo` XATTR | Same key, XATTR, and JSON schema; built-in Tokio KV routing preserves legacy support, while the optional official SDK adapter supports XATTR lookup/upsert/idempotent delete on modern supported servers | Both adapters implemented and unit-tested; live KV/XATTR E2E deferred |
 | Custom checkpoint | Custom metadata implementation | Object-safe async `CheckpointStore`; lower-level `CouchbaseCheckpointCollection` adapter is also replaceable | Implemented and unit-tested |
 | Noop checkpoint | `metadata.type: noop` returns empty state and accepts writes/clears | `NoopCheckpointStore` returns no stored vBuckets and accepts save/clear without persistence | Implemented and unit-tested |
 | Read-only checkpoint | `metadata.readOnly: true` delegates load and suppresses save/clear | `ReadOnlyCheckpointStore` wraps any async store, delegates load, and suppresses save/clear | Implemented and unit-tested |
 | Standalone assignment | One consumer can own the complete vBucket set | `AssignmentMode::Standalone` follows the current topology | Implemented and unit-tested |
 | External/static assignment | Static/dynamic membership can provide a partition slice | `VBucketAssignment` carries an explicit monotonic generation fence | Implemented and unit-tested; subscription replacement remains orchestrator-owned |
-| Couchbase membership | Couchbase-coordinated group membership | Separate crate with CAS registry, heartbeat, stale pruning, incarnation fencing, deterministic rebalance, and built-in Tokio KV store | Implemented and unit-tested; live coordination E2E deferred |
+| Couchbase membership | Couchbase-coordinated group membership | Separate crate with CAS registry, heartbeat, stale pruning, incarnation fencing, deterministic rebalance, and built-in Tokio KV store; optional official SDK KV/CAS store for modern supported servers | Both stores implemented and unit-tested; live coordination E2E deferred |
 | Kubernetes membership | StatefulSet and Kubernetes membership discovery | Separate crate with StatefulSet ordinal mode and Pod watch mode using UID/readiness/termination fences | Implemented and unit-tested; live cluster E2E deferred |
 | Metrics and health | Built-in HTTP/API and Prometheus collector | Optional `rust-dcp-prometheus` standard Collector over cloneable SDK metric/health handles; registry and HTTP surface are application-owned | Collector implemented and unit-tested; intentional HTTP embedding difference |
 | Tracing | Optional external tracing integrations | `tracing` spans/events at bootstrap, subscription, processing, flush, and close boundaries | Implemented; exporter integration is application-owned |
@@ -71,7 +83,7 @@ The final code-bearing branch was validated before its commit/PR stage with:
 
 ```text
 K8S_OPENAPI_ENABLED_VERSION=1.30 cargo test --workspace --all-features
-194 tests passed; 0 failed
+199 tests passed; 0 failed
 
 K8S_OPENAPI_ENABLED_VERSION=1.30 cargo clippy \
   --workspace --all-targets --all-features -- -D warnings
@@ -82,7 +94,7 @@ K8S_OPENAPI_ENABLED_VERSION=1.30 RUSTDOCFLAGS='-D warnings' \
   cargo doc --workspace --all-features --no-deps
 ```
 
-The test suite includes Tokio duplex/mock transports, exact packet layouts, malformed responses, SASL/SCRAM vectors, TLS root handling, Snappy limits, topology revisions, stream reopen and rollback paths, rollback mitigation, listener cutoff/checkpoint progress, checkpoint failure/races and noop/read-only adapters, collection manifest/system events, lifecycle cancellation, health/metrics, and membership fencing.
+The test suite includes Tokio duplex/mock transports, exact packet layouts, malformed responses, SASL/SCRAM vectors, TLS root handling, Snappy limits, topology revisions, stream reopen and rollback paths, rollback mitigation, listener cutoff/checkpoint progress, checkpoint failure/races and noop/read-only adapters, official SDK checkpoint absence/XATTR mappings, official SDK membership CAS/conflict mappings, collection manifest/system events, lifecycle cancellation, health/metrics, and membership fencing.
 
 No test in this evidence block contacted a live Couchbase Server.
 
@@ -96,6 +108,7 @@ The following is a separate acceptance phase and was not executed while completi
 | Couchbase Server 7.x with named collections | Scope and multi-collection filters, system events, collection recreation/manifest fencing, XATTR, Snappy |
 | Couchbase Server 7.2+ with Magma history | Change Streams control and historical snapshot behavior |
 | Current supported server with replicas | Active-plus-all-available-replica rollback mitigation under persistence lag and failover |
+| Server 7.6–8.0 with official Rust SDK adapter | Checkpoint XATTR load/upsert/delete, membership raw JSON/CAS conflict behavior, TLS, routing refresh, and shared SDK collection lifecycle |
 | Live Couchbase membership group | CAS conflicts, heartbeat expiry, fenced duplicate incarnation, rebalance handoff |
 | Live Kubernetes cluster | StatefulSet ordinal mode, Pod readiness/UID replacement, watch restart, assignment handoff |
 
