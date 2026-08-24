@@ -16,11 +16,13 @@ const REQUESTED_HELLO_FEATURES: &[HelloFeature] = &[
     HelloFeature::Xattr,
     HelloFeature::ExtendedErrors,
     HelloFeature::SelectBucket,
+    HelloFeature::Snappy,
     HelloFeature::Json,
     HelloFeature::Duplex,
     HelloFeature::ClusterMapNotifications,
     HelloFeature::AltRequest,
     HelloFeature::Collections,
+    HelloFeature::SnappyEverywhere,
 ];
 
 /// Features confirmed while bootstrapping one Couchbase KV connection.
@@ -216,6 +218,10 @@ pub async fn bootstrap_kv_on_connection(
     ensure_success(&hello_response, Opcode::HELLO, "HELLO feature negotiation")?;
     let hello_features = parse_hello_features(&hello_response)?;
     connection.set_collections_enabled(hello_features.contains(&HelloFeature::Collections));
+    connection.set_snappy_enabled(
+        hello_features.contains(&HelloFeature::Snappy)
+            || hello_features.contains(&HelloFeature::SnappyEverywhere),
+    );
 
     let sasl_mechanism = authenticate(&mut connection, &config.credentials).await?;
     let response = connection.request(select_bucket(&config.bucket, 0)).await?;
@@ -453,6 +459,35 @@ mod tests {
         Frame::success_response_to(request)
     }
 
+    fn assert_snappy_requested(request: &Frame) {
+        let requested = request
+            .value
+            .chunks_exact(2)
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+            .collect::<BTreeSet<_>>();
+        assert!(requested.contains(&HelloFeature::Snappy.as_u16()));
+        assert!(requested.contains(&HelloFeature::SnappyEverywhere.as_u16()));
+    }
+
+    fn compressed_topology_frame() -> Frame {
+        let mut frame = Frame::request(Opcode::GET_CLUSTER_CONFIG);
+        frame.datatype = 0x02;
+        frame.value = snap::raw::Encoder::new()
+            .compress_vec(b"compressed topology")
+            .unwrap()
+            .into();
+        frame
+    }
+
+    fn assert_snappy_capabilities(connection: &DcpConnection) {
+        assert!(connection.capabilities().supports(HelloFeature::Snappy));
+        assert!(
+            connection
+                .capabilities()
+                .supports(HelloFeature::SnappyEverywhere)
+        );
+    }
+
     #[tokio::test]
     async fn bootstrap_negotiates_plain_auth_and_dcp_controls() {
         let (client_io, server_io) = duplex(32 * 1024);
@@ -466,10 +501,13 @@ mod tests {
                 let mut response = success_response(&request);
                 match request.opcode {
                     Opcode::HELLO => {
+                        assert_snappy_requested(&request);
                         let mut value = BytesMut::new();
                         value.put_u16(HelloFeature::Xattr.as_u16());
                         value.put_u16(HelloFeature::SelectBucket.as_u16());
                         value.put_u16(HelloFeature::Collections.as_u16());
+                        value.put_u16(HelloFeature::Snappy.as_u16());
+                        value.put_u16(HelloFeature::SnappyEverywhere.as_u16());
                         value.put_u16(0xffff);
                         response.value = value.freeze();
                     }
@@ -498,6 +536,7 @@ mod tests {
                         }
                         if key == "send_stream_end_on_client_close_stream" {
                             framed.send(response).await.unwrap();
+                            framed.send(compressed_topology_frame()).await.unwrap();
                             break;
                         }
                     }
@@ -509,7 +548,7 @@ mod tests {
             controls
         });
 
-        let bootstrapped =
+        let mut bootstrapped =
             bootstrap_on_connection(connection, &test_config(), "rust-dcp-test", "consumer-1")
                 .await
                 .unwrap();
@@ -524,6 +563,7 @@ mod tests {
                 .capabilities()
                 .supports(HelloFeature::Collections)
         );
+        assert_snappy_capabilities(&bootstrapped);
         assert!(
             bootstrapped
                 .capabilities()
@@ -544,6 +584,9 @@ mod tests {
                 .capabilities()
                 .supports_control(DcpControlFeature::StreamEndOnClose)
         );
+        let topology = bootstrapped.connection_mut().receive_frame().await.unwrap();
+        assert_eq!(topology.value, Bytes::from_static(b"compressed topology"));
+        assert_eq!(topology.datatype, 0);
         assert_eq!(controls.get("set_priority").unwrap(), "medium");
         assert_eq!(controls.get("connection_buffer_size").unwrap(), "20971520");
         assert_eq!(controls.get("set_noop_interval").unwrap(), "20");

@@ -6,7 +6,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use rust_dcp_protocol::{Frame, FrameCodec};
+use rust_dcp_protocol::{Frame, FrameCodec, ProtocolError};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -20,6 +20,9 @@ use tokio_rustls::{
 use tokio_util::codec::Framed;
 
 use crate::{DcpError, Result, SeedAddress, TlsConfig};
+
+const SNAPPY_DATATYPE_FLAG: u8 = 0x02;
+const MAX_DECOMPRESSED_VALUE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Object-safe Tokio stream accepted by the KV protocol transport.
 pub trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -37,6 +40,7 @@ pub struct KvConnection {
     next_opaque: u32,
     pending: VecDeque<Frame>,
     last_inbound_activity: Instant,
+    snappy_enabled: bool,
 }
 
 impl std::fmt::Debug for KvConnection {
@@ -47,6 +51,7 @@ impl std::fmt::Debug for KvConnection {
             .field("request_timeout", &self.request_timeout)
             .field("pending_frames", &self.pending.len())
             .field("last_inbound_activity", &self.last_inbound_activity)
+            .field("snappy_enabled", &self.snappy_enabled)
             .finish_non_exhaustive()
     }
 }
@@ -105,6 +110,7 @@ impl KvConnection {
             next_opaque: 1,
             pending: VecDeque::new(),
             last_inbound_activity: Instant::now(),
+            snappy_enabled: false,
         }
     }
 
@@ -124,6 +130,11 @@ impl KvConnection {
     pub fn set_collections_enabled(&mut self, enabled: bool) {
         let codec = self.framed.codec().clone().with_collections(enabled);
         *self.framed.codec_mut() = codec;
+    }
+
+    /// Enables inbound Snappy decompression after successful HELLO negotiation.
+    pub fn set_snappy_enabled(&mut self, enabled: bool) {
+        self.snappy_enabled = enabled;
     }
 
     /// Sends one frame without waiting for a response.
@@ -194,6 +205,36 @@ impl KvConnection {
             ))
         })?;
         self.last_inbound_activity = Instant::now();
+        self.decode_inbound_frame(frame)
+    }
+
+    fn decode_inbound_frame(&self, mut frame: Frame) -> Result<Frame> {
+        if frame.datatype & SNAPPY_DATATYPE_FLAG == 0 {
+            return Ok(frame);
+        }
+        if !self.snappy_enabled {
+            return Err(ProtocolError::MalformedFrame(
+                "received a Snappy-compressed value without HELLO negotiation".into(),
+            )
+            .into());
+        }
+
+        let decompressed_len = snap::raw::decompress_len(&frame.value).map_err(|error| {
+            ProtocolError::MalformedFrame(format!("invalid Snappy value header: {error}"))
+        })?;
+        if decompressed_len > MAX_DECOMPRESSED_VALUE_SIZE {
+            return Err(ProtocolError::InvalidLength(format!(
+                "Snappy value expands to {decompressed_len} bytes, exceeding maximum {MAX_DECOMPRESSED_VALUE_SIZE}"
+            ))
+            .into());
+        }
+        let value = snap::raw::Decoder::new()
+            .decompress_vec(&frame.value)
+            .map_err(|error| {
+                ProtocolError::MalformedFrame(format!("invalid Snappy value: {error}"))
+            })?;
+        frame.value = value.into();
+        frame.datatype &= !SNAPPY_DATATYPE_FLAG;
         Ok(frame)
     }
 }
@@ -260,6 +301,7 @@ fn endpoint_host(seed: &str) -> &str {
 mod tests {
     use std::time::Duration;
 
+    use bytes::Bytes;
     use rust_dcp_protocol::{Frame, FrameCodec, Opcode, ProtocolError, Status};
     use tokio::io::duplex;
     use tokio_util::codec::Framed;
@@ -315,6 +357,112 @@ mod tests {
             .unwrap();
 
         assert_eq!(connection.last_inbound_activity(), before);
+    }
+
+    #[tokio::test]
+    async fn negotiated_snappy_frames_are_decompressed_without_losing_wire_size() {
+        let (client_io, server_io) = duplex(4_096);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        connection.set_snappy_enabled(true);
+        let value = b"a compressible Couchbase DCP value".repeat(16);
+        let compressed = snap::raw::Encoder::new().compress_vec(&value).unwrap();
+        let compressed_len = compressed.len();
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut frame = Frame::request(Opcode::DCP_MUTATION);
+            frame.datatype = 0x03;
+            frame.value = compressed.into();
+            framed.send(frame).await.unwrap();
+        });
+
+        let frame = connection.receive_frame().await.unwrap();
+
+        assert_eq!(frame.value.as_ref(), value);
+        assert_eq!(frame.datatype, 0x01);
+        assert_eq!(
+            frame.wire_size(),
+            rust_dcp_protocol::HEADER_LEN + compressed_len
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compressed_frame_without_negotiation_is_rejected() {
+        let (client_io, server_io) = duplex(4_096);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        let compressed = snap::raw::Encoder::new()
+            .compress_vec(b"compressed value")
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut frame = Frame::request(Opcode::DCP_MUTATION);
+            frame.datatype = SNAPPY_DATATYPE_FLAG;
+            frame.value = compressed.into();
+            framed.send(frame).await.unwrap();
+        });
+
+        let error = connection.receive_frame().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            DcpError::Protocol(ProtocolError::MalformedFrame(message))
+                if message.contains("without HELLO negotiation")
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_snappy_value_is_a_protocol_error() {
+        let (client_io, server_io) = duplex(4_096);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        connection.set_snappy_enabled(true);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut frame = Frame::request(Opcode::DCP_MUTATION);
+            frame.datatype = SNAPPY_DATATYPE_FLAG;
+            frame.value = Bytes::from_static(b"not a Snappy block");
+            framed.send(frame).await.unwrap();
+        });
+
+        assert!(matches!(
+            connection.receive_frame().await,
+            Err(DcpError::Protocol(ProtocolError::MalformedFrame(_)))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snappy_value_cannot_expand_past_the_inbound_limit() {
+        let (client_io, server_io) = duplex(4_096);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        connection.set_snappy_enabled(true);
+        let mut claimed_len = MAX_DECOMPRESSED_VALUE_SIZE + 1;
+        let mut header = Vec::new();
+        loop {
+            let mut byte = u8::try_from(claimed_len & 0x7f).unwrap();
+            claimed_len >>= 7;
+            if claimed_len != 0 {
+                byte |= 0x80;
+            }
+            header.push(byte);
+            if claimed_len == 0 {
+                break;
+            }
+        }
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut frame = Frame::request(Opcode::DCP_MUTATION);
+            frame.datatype = SNAPPY_DATATYPE_FLAG;
+            frame.value = header.into();
+            framed.send(frame).await.unwrap();
+        });
+
+        assert!(matches!(
+            connection.receive_frame().await,
+            Err(DcpError::Protocol(ProtocolError::InvalidLength(message)))
+                if message.contains("Snappy value expands")
+        ));
+        server.await.unwrap();
     }
 
     #[test]
