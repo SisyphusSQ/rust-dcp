@@ -16,13 +16,16 @@ pub mod protocol {
 }
 
 pub use rust_dcp_core::{
-    AssignmentMode, BootstrapCapabilities, CheckpointConfig, CheckpointMode, CollectionFilter,
-    Credentials, DataType, DcpCheckpoint, DcpConfig, DcpConfigBuilder, DcpConnection,
-    DcpControlFeature, DcpDeletion, DcpError, DcpEvent, DcpExpiration, DcpMode, DcpMutation,
-    DcpPriority, DcpStream, DcpStreamFlags, DcpStreamItem, FailoverEntry, FlowControlConfig,
-    HealthCheckConfig, OsoSnapshot, OsoSnapshotState, PartitionOpenState, RollbackAction,
+    AckOutcome, AssignmentMode, BootstrapCapabilities, CheckpointConfig, CheckpointCoordinator,
+    CheckpointFlushReport, CheckpointMetrics, CheckpointMode, CheckpointStore,
+    CheckpointStoreFuture, CheckpointStream, CheckpointStreamItem, CollectionFilter,
+    CouchbaseCheckpointCollection, CouchbaseCheckpointStore, Credentials, DataType, DcpCheckpoint,
+    DcpConfig, DcpConfigBuilder, DcpConnection, DcpControlFeature, DcpDeletion, DcpError, DcpEvent,
+    DcpExpiration, DcpMode, DcpMutation, DcpPriority, DcpStream, DcpStreamFlags, DcpStreamItem,
+    EventAck, FailoverEntry, FileCheckpointStore, FlowControlConfig, HealthCheckConfig,
+    OsoSnapshot, OsoSnapshotState, PartitionCheckpointStatus, PartitionOpenState, RollbackAction,
     RollbackApplied, RollbackHandler, RollbackPolicy, RollbackRequest, SeedAddress, SeqNoAdvanced,
     SnapshotFlags, SnapshotMarker, StartPosition, StreamEnd, StreamEndReason, StreamFilter,
-    StreamOpenReport, SystemEvent, SystemEventKind, TlsConfig, VBucketAssignment,
-    VBucketStreamRequest, bootstrap_connection, open_dcp_stream,
+    StreamOpenReport, SystemEvent, SystemEventKind, TlsConfig, TrackedEvent, VBucketAssignment,
+    VBucketStreamRequest, bootstrap_connection, load_checkpoints, open_dcp_stream,
 };
