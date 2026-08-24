@@ -7,9 +7,14 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+prometheus = ["dep:rust-dcp-prometheus"]
+
 [dependencies]
 futures-util.workspace = true
 rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+rust-dcp-prometheus = { path = "../rust-dcp-prometheus", version = "0.1.0", optional = true }
 rust-dcp-protocol = { path = "../rust-dcp-protocol", version = "0.1.0" }
 
 [lints]

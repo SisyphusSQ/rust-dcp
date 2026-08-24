@@ -10,6 +10,18 @@ use rust_dcp::{
     FileCheckpointStore, RollbackMitigationConfig, TopologyNetwork,
 };
 
+#[cfg(feature = "prometheus")]
+#[test]
+fn prometheus_feature_reexports_the_application_collector() {
+    let collector = rust_dcp::DcpPrometheusCollector::new(
+        rust_dcp::DcpMetrics::default(),
+        rust_dcp::DcpHealth::default(),
+    )
+    .expect("static Prometheus descriptors must be valid");
+
+    let _: rust_dcp::DcpPrometheusCollector = collector;
+}
+
 fn assert_subscription_stream<S>()
 where
     S: Stream<Item = rust_dcp::Result<DcpDelivery>>,

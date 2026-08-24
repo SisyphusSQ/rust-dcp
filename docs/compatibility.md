@@ -47,7 +47,7 @@ An “implemented” row is not a claim that every listed Couchbase Server relea
 | External/static assignment | Static/dynamic membership can provide a partition slice | `VBucketAssignment` carries an explicit monotonic generation fence | Implemented and unit-tested; subscription replacement remains orchestrator-owned |
 | Couchbase membership | Couchbase-coordinated group membership | Separate crate with CAS registry, heartbeat, stale pruning, incarnation fencing, deterministic rebalance, and built-in Tokio KV store | Implemented and unit-tested; live coordination E2E deferred |
 | Kubernetes membership | StatefulSet and Kubernetes membership discovery | Separate crate with StatefulSet ordinal mode and Pod watch mode using UID/readiness/termination fences | Implemented and unit-tested; live cluster E2E deferred |
-| Metrics and health | Built-in HTTP/API and metrics exporter | Cloneable SDK metric/health snapshots; exporter and HTTP surface are application-owned | Intentional embedding difference |
+| Metrics and health | Built-in HTTP/API and Prometheus collector | Optional `rust-dcp-prometheus` standard Collector over cloneable SDK metric/health handles; registry and HTTP surface are application-owned | Collector implemented and unit-tested; intentional HTTP embedding difference |
 | Tracing | Optional external tracing integrations | `tracing` spans/events at bootstrap, subscription, processing, flush, and close boundaries | Implemented; exporter integration is application-owned |
 
 ## Server capability gates
@@ -67,8 +67,8 @@ An “implemented” row is not a claim that every listed Couchbase Server relea
 The final code-bearing branch was validated before its commit/PR stage with:
 
 ```text
-K8S_OPENAPI_ENABLED_VERSION=1.30 cargo test --workspace
-187 tests passed; 0 failed
+K8S_OPENAPI_ENABLED_VERSION=1.30 cargo test --workspace --all-features
+190 tests passed; 0 failed
 
 K8S_OPENAPI_ENABLED_VERSION=1.30 cargo clippy \
   --workspace --all-targets --all-features -- -D warnings

@@ -1,0 +1,15 @@
+[package]
+name = "rust-dcp-prometheus"
+description = "Prometheus Collector adapter for rust-dcp observability handles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+prometheus.workspace = true
+rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+
+[lints]
+workspace = true

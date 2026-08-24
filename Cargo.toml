@@ -4,6 +4,7 @@ members = [
     "crates/rust-dcp-core",
     "crates/rust-dcp-membership-couchbase",
     "crates/rust-dcp-membership-kubernetes",
+    "crates/rust-dcp-prometheus",
     "crates/rust-dcp-protocol",
 ]
 resolver = "3"
@@ -26,6 +27,7 @@ humantime-serde = "1.1"
 k8s-openapi = "=0.26.0"
 kube = { version = "=2.0.1", features = ["runtime"] }
 pbkdf2 = "0.12"
+prometheus = "0.14"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }

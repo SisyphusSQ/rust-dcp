@@ -16,7 +16,7 @@ The frozen first-release feature scope is implemented and covered by determinist
 - explicit rollback policy and active-plus-replica persistence rollback mitigation;
 - DCP priority, optional Couchbase Change Streams, Snappy decompression, datatype flags, and raw XATTR framing;
 - standalone or externally fenced assignments, with optional Couchbase and Kubernetes membership crates;
-- application-owned metrics export, health snapshots, and `tracing` instrumentation without a forced HTTP server.
+- application-owned Prometheus collection, health snapshots, and `tracing` instrumentation without a forced HTTP server.
 
 OSO packets are parsed and remain visible, but rust-dcp does not request OSO enablement. This is deliberate until an OSO-aware checkpoint/recovery contract is defined.
 
@@ -103,7 +103,23 @@ Membership updates produce assignments; the integrating application owns subscri
 
 ## Observability
 
-`DcpClient::metrics` and `DcpSubscription::metrics` return cloneable counters/gauges with snapshot APIs. Health handles expose bootstrap, probe, topology-generation, connection, failure, and stopped state. Runtime operations emit `tracing` spans and events. Export format, HTTP endpoints, and OpenTelemetry/Prometheus integration remain application choices.
+`DcpClient::metrics` and `DcpSubscription::metrics` return cloneable counters/gauges with snapshot APIs. Health handles expose bootstrap, probe, topology-generation, connection, failure, and stopped state. Runtime operations emit `tracing` spans and events.
+
+Enable the umbrella crate's `prometheus` feature to register those live handles in an application-owned registry:
+
+```rust,no_run
+use prometheus::Registry;
+use rust_dcp::{DcpClient, DcpPrometheusCollector};
+
+fn register_dcp_metrics(
+    client: &DcpClient,
+    registry: &Registry,
+) -> prometheus::Result<()> {
+    DcpPrometheusCollector::new(client.metrics(), client.health())?.register(registry)
+}
+```
+
+The collector emits `rust_dcp_*` counters and gauges for bootstrap, topology, reconnect, health, connections, assignments, deliveries by event type, processing, stream errors, generation fencing, rollback, and rollback mitigation. Each `Registry::gather` reads the latest in-memory snapshot and performs no network or checkpoint I/O. `rust-dcp` does not create an HTTP listener or select an HTTP framework; the integrating Tokio application owns text encoding, routing, authentication, and endpoint lifecycle.
 
 ## Crates
 
@@ -112,6 +128,7 @@ Membership updates produce assignments; the integrating application owns subscri
 | `rust-dcp` | Umbrella public API |
 | `rust-dcp-core` | Tokio transport, topology, stream lifecycle, checkpoints, rollback, collections, and client API |
 | `rust-dcp-protocol` | Memcached/DCP framing, commands, parsers, and event codecs |
+| `rust-dcp-prometheus` | Standard Prometheus `Collector` over live SDK metrics and health handles; no HTTP server |
 | `rust-dcp-membership-couchbase` | Couchbase-backed membership and assignment extension |
 | `rust-dcp-membership-kubernetes` | Kubernetes-backed membership and assignment extension |
 
