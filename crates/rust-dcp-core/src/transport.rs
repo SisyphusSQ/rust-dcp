@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     io::{self, BufReader, Cursor},
     sync::Arc,
     time::Duration,
@@ -185,6 +185,72 @@ impl KvConnection {
         .map_err(|_| DcpError::Timeout(request_timeout))?
     }
 
+    /// Sends a pipelined request batch and returns correlated responses in
+    /// request order. Unsolicited frames remain available through
+    /// [`Self::receive_frame`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for duplicate explicit opaque values, or
+    /// a timeout, protocol, I/O, or unexpected EOF error for the batch.
+    pub async fn request_batch(&mut self, mut requests: Vec<Frame>) -> Result<Vec<Frame>> {
+        let mut pending_responses = BTreeMap::new();
+        for (index, request) in requests.iter().enumerate() {
+            if request.opaque != 0 && pending_responses.insert(request.opaque, index).is_some() {
+                return Err(DcpError::InvalidConfiguration(format!(
+                    "request batch contains duplicate opaque {}",
+                    request.opaque
+                )));
+            }
+        }
+        for (index, request) in requests.iter_mut().enumerate() {
+            if request.opaque != 0 {
+                continue;
+            }
+            loop {
+                request.opaque = self.allocate_opaque();
+                if let Entry::Vacant(entry) = pending_responses.entry(request.opaque) {
+                    entry.insert(index);
+                    break;
+                }
+            }
+        }
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let request_timeout = self.request_timeout;
+        time::timeout(request_timeout, async {
+            let response_count = requests.len();
+            for request in requests {
+                self.send_frame(request).await?;
+            }
+            let mut responses = vec![None; response_count];
+            while !pending_responses.is_empty() {
+                let frame = self.read_raw().await?;
+                if frame.magic.is_response()
+                    && let Some(index) = pending_responses.remove(&frame.opaque)
+                {
+                    responses[index] = Some(frame);
+                } else {
+                    self.pending.push_back(frame);
+                }
+            }
+            responses
+                .into_iter()
+                .map(|response| {
+                    response.ok_or_else(|| {
+                        DcpError::Protocol(ProtocolError::MalformedFrame(
+                            "request batch completed without every response".into(),
+                        ))
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|_| DcpError::Timeout(request_timeout))?
+    }
+
     /// Releases the underlying `Framed` transport for the DCP runtime.
     #[must_use]
     pub fn into_framed(self) -> Framed<BoxedIo, FrameCodec> {
@@ -329,6 +395,79 @@ mod tests {
             .expect("response");
         assert_eq!(response.opcode, Opcode::HELLO);
         assert_eq!(connection.receive_frame().await.unwrap().opaque, 99);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_batch_correlates_out_of_order_responses_and_preserves_unsolicited_frames() {
+        let (client_io, server_io) = duplex(8_192);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                requests.push(framed.next().await.unwrap().unwrap());
+            }
+            let mut unsolicited = Frame::request(Opcode::DCP_NOOP);
+            unsolicited.opaque = 99;
+            framed.send(unsolicited).await.unwrap();
+            for request in requests.into_iter().rev() {
+                framed
+                    .send(Frame::success_response_to(&request))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let responses = connection
+            .request_batch(vec![
+                Frame::request(Opcode::HELLO),
+                Frame::request(Opcode::NOOP),
+                Frame::request(Opcode::GET_CLUSTER_CONFIG),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            responses
+                .iter()
+                .map(|response| response.opcode)
+                .collect::<Vec<_>>(),
+            vec![Opcode::HELLO, Opcode::NOOP, Opcode::GET_CLUSTER_CONFIG]
+        );
+        assert_eq!(connection.receive_frame().await.unwrap().opaque, 99);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_batch_allocates_around_explicit_future_opaque_values() {
+        let (client_io, server_io) = duplex(8_192);
+        let mut connection = KvConnection::from_io(client_io, "test-peer", Duration::from_secs(1));
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let automatic = framed.next().await.unwrap().unwrap();
+            let explicit = framed.next().await.unwrap().unwrap();
+            assert_ne!(automatic.opaque, explicit.opaque);
+            assert_eq!(explicit.opaque, 1);
+            framed
+                .send(Frame::success_response_to(&automatic))
+                .await
+                .unwrap();
+            framed
+                .send(Frame::success_response_to(&explicit))
+                .await
+                .unwrap();
+        });
+        let automatic = Frame::request(Opcode::HELLO);
+        let mut explicit = Frame::request(Opcode::NOOP);
+        explicit.opaque = 1;
+
+        let responses = connection
+            .request_batch(vec![automatic, explicit])
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 2);
         server.await.unwrap();
     }
 

@@ -282,6 +282,25 @@ pub struct VBucketSeqNo {
     pub seqno: u64,
 }
 
+/// Persistence state returned by `OBSERVE_SEQNO` for one vBucket copy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObserveSeqNoResponse {
+    /// Whether the requested branch was replaced by a hard failover.
+    pub did_failover: bool,
+    /// vBucket identifier echoed by the server.
+    pub vbucket: u16,
+    /// Current history branch on the observed node.
+    pub vbucket_uuid: u64,
+    /// Highest sequence number persisted on the observed node.
+    pub persisted_seqno: u64,
+    /// Highest sequence number currently known by the observed node.
+    pub current_seqno: u64,
+    /// Previous branch replaced by a hard failover, when supplied.
+    pub old_vbucket_uuid: Option<u64>,
+    /// Last sequence number on the previous branch, when supplied.
+    pub last_seqno: Option<u64>,
+}
+
 /// Identifiers returned by `COLLECTIONS_GET_ID`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionId {
@@ -512,6 +531,16 @@ pub fn get_failover_log(vbucket: u16, opaque: u32) -> Frame {
     frame
 }
 
+/// Builds an `OBSERVE_SEQNO` request for one vBucket history branch.
+#[must_use]
+pub fn observe_seqno(vbucket: u16, vbucket_uuid: u64, opaque: u32) -> Frame {
+    let mut frame = Frame::request(Opcode::OBSERVE_SEQNO);
+    frame.vbucket = vbucket;
+    frame.value = Bytes::copy_from_slice(&vbucket_uuid.to_be_bytes());
+    frame.opaque = opaque;
+    frame
+}
+
 /// Builds one vBucket stream request.
 ///
 /// # Errors
@@ -663,6 +692,59 @@ pub fn parse_vbucket_seqnos(frame: &Frame) -> Result<Vec<VBucketSeqNo>> {
             ]),
         })
         .collect())
+}
+
+/// Parses a successful `OBSERVE_SEQNO` response in normal or hard-failover
+/// format.
+///
+/// # Errors
+///
+/// Returns a protocol error for the wrong opcode, a non-success status, an
+/// unknown format byte, or a truncated payload.
+pub fn parse_observe_seqno(frame: &Frame) -> Result<ObserveSeqNoResponse> {
+    ensure_response(frame, Opcode::OBSERVE_SEQNO)?;
+    let format =
+        frame.value.first().copied().ok_or_else(|| {
+            ProtocolError::MalformedFrame("OBSERVE_SEQNO response is empty".into())
+        })?;
+    let minimum_len = match format {
+        0 => 27,
+        1 => 43,
+        other => {
+            return Err(ProtocolError::MalformedFrame(format!(
+                "OBSERVE_SEQNO response has unknown format {other}"
+            )));
+        }
+    };
+    if frame.value.len() < minimum_len {
+        return Err(ProtocolError::MalformedFrame(format!(
+            "OBSERVE_SEQNO format {format} requires {minimum_len} bytes, got {}",
+            frame.value.len()
+        )));
+    }
+
+    let read_u64 = |offset: usize| -> Result<u64> {
+        let bytes = frame.value.get(offset..offset + 8).ok_or_else(|| {
+            ProtocolError::MalformedFrame(format!(
+                "OBSERVE_SEQNO response is missing the u64 at offset {offset}"
+            ))
+        })?;
+        let bytes = <[u8; 8]>::try_from(bytes).map_err(|error| {
+            ProtocolError::MalformedFrame(format!(
+                "OBSERVE_SEQNO u64 at offset {offset} is malformed: {error}"
+            ))
+        })?;
+        Ok(u64::from_be_bytes(bytes))
+    };
+    Ok(ObserveSeqNoResponse {
+        did_failover: format == 1,
+        vbucket: u16::from_be_bytes([frame.value[1], frame.value[2]]),
+        vbucket_uuid: read_u64(3)?,
+        persisted_seqno: read_u64(11)?,
+        current_seqno: read_u64(19)?,
+        old_vbucket_uuid: (format == 1).then(|| read_u64(27)).transpose()?,
+        last_seqno: (format == 1).then(|| read_u64(35)).transpose()?,
+    })
 }
 
 /// Parses a successful collection-ID response.
@@ -922,6 +1004,59 @@ mod tests {
                 seqno: 999
             }]
         );
+    }
+
+    #[test]
+    fn observe_seqno_request_and_response_match_the_memcached_contract() {
+        let request = observe_seqno(9, 0xfeed_beef, 17);
+        assert_eq!(request.opcode, Opcode::OBSERVE_SEQNO);
+        assert_eq!(request.vbucket, 9);
+        assert_eq!(&request.value[..], &0xfeed_beef_u64.to_be_bytes());
+        assert_eq!(request.opaque, 17);
+
+        let mut response = Frame::response(Opcode::OBSERVE_SEQNO, Status::SUCCESS);
+        let mut value = BytesMut::new();
+        value.put_u8(0);
+        value.put_u16(9);
+        value.put_u64(0xfeed_beef);
+        value.put_u64(41);
+        value.put_u64(43);
+        response.value = value.freeze();
+
+        assert_eq!(
+            parse_observe_seqno(&response).unwrap(),
+            ObserveSeqNoResponse {
+                did_failover: false,
+                vbucket: 9,
+                vbucket_uuid: 0xfeed_beef,
+                persisted_seqno: 41,
+                current_seqno: 43,
+                old_vbucket_uuid: None,
+                last_seqno: None,
+            }
+        );
+    }
+
+    #[test]
+    fn observe_seqno_hard_failover_and_malformed_formats_are_explicit() {
+        let mut response = Frame::response(Opcode::OBSERVE_SEQNO, Status::SUCCESS);
+        let mut value = BytesMut::new();
+        value.put_u8(1);
+        value.put_u16(3);
+        value.put_u64(200);
+        value.put_u64(20);
+        value.put_u64(22);
+        value.put_u64(100);
+        value.put_u64(19);
+        response.value = value.freeze();
+
+        let observed = parse_observe_seqno(&response).unwrap();
+        assert!(observed.did_failover);
+        assert_eq!(observed.old_vbucket_uuid, Some(100));
+        assert_eq!(observed.last_seqno, Some(19));
+
+        response.value = Bytes::from_static(&[2]);
+        assert!(parse_observe_seqno(&response).is_err());
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub struct DcpMetricsSnapshot {
     pub stale_generation_drops: u64,
     /// Explicit rollback rewinds accepted by policy.
     pub rollbacks: u64,
+    /// Deliveries delayed until every available vBucket copy persisted them.
+    pub rollback_mitigation_delays: u64,
+    /// Bounded stalls or history changes reported by rollback mitigation.
+    pub rollback_mitigation_failures: u64,
 }
 
 #[derive(Debug, Default)]
@@ -92,6 +96,8 @@ struct MetricCounters {
     stream_errors: AtomicU64,
     stale_generation_drops: AtomicU64,
     rollbacks: AtomicU64,
+    rollback_mitigation_delays: AtomicU64,
+    rollback_mitigation_failures: AtomicU64,
 }
 
 impl DcpMetrics {
@@ -123,6 +129,8 @@ impl DcpMetrics {
             stream_errors: load(&self.inner.stream_errors),
             stale_generation_drops: load(&self.inner.stale_generation_drops),
             rollbacks: load(&self.inner.rollbacks),
+            rollback_mitigation_delays: load(&self.inner.rollback_mitigation_delays),
+            rollback_mitigation_failures: load(&self.inner.rollback_mitigation_failures),
         }
     }
 
@@ -205,6 +213,14 @@ impl DcpMetrics {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     Some(current.saturating_add(count))
                 });
+    }
+
+    pub(crate) fn record_rollback_mitigation_delay(&self) {
+        increment(&self.inner.rollback_mitigation_delays);
+    }
+
+    pub(crate) fn record_rollback_mitigation_failure(&self) {
+        increment(&self.inner.rollback_mitigation_failures);
     }
 }
 
@@ -330,6 +346,8 @@ mod tests {
         metrics.record_processed();
         metrics.record_reconnect();
         metrics.record_stale_generation_drop();
+        metrics.record_rollback_mitigation_delay();
+        metrics.record_rollback_mitigation_failure();
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.bootstrap_attempts, 1);
@@ -341,6 +359,8 @@ mod tests {
         assert_eq!(snapshot.processed_events, 1);
         assert_eq!(snapshot.reconnects, 1);
         assert_eq!(snapshot.stale_generation_drops, 1);
+        assert_eq!(snapshot.rollback_mitigation_delays, 1);
+        assert_eq!(snapshot.rollback_mitigation_failures, 1);
     }
 
     #[test]
