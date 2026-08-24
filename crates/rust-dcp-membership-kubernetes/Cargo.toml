@@ -1,0 +1,25 @@
+[package]
+name = "rust-dcp-membership-kubernetes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+__check = ["k8s-openapi/v1_30"]
+
+[dependencies]
+futures-util.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+k8s-openapi = { workspace = true, features = ["v1_30"] }
+
+[lints]
+workspace = true
