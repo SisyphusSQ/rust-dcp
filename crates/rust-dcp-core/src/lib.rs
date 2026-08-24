@@ -6,6 +6,8 @@ mod assignment;
 mod auth;
 mod bootstrap;
 mod checkpoint;
+mod checkpoint_runtime;
+mod checkpoint_store;
 mod config;
 mod error;
 mod event;
@@ -20,6 +22,14 @@ pub use bootstrap::{
     bootstrap_on_connection,
 };
 pub use checkpoint::{DcpCheckpoint, FailoverEntry};
+pub use checkpoint_runtime::{
+    AckOutcome, CheckpointCoordinator, CheckpointFlushReport, CheckpointMetrics, CheckpointStream,
+    CheckpointStreamItem, EventAck, PartitionCheckpointStatus, TrackedEvent, load_checkpoints,
+};
+pub use checkpoint_store::{
+    CheckpointStore, CheckpointStoreFuture, CouchbaseCheckpointCollection,
+    CouchbaseCheckpointStore, FileCheckpointStore,
+};
 pub use config::{
     CheckpointConfig, CheckpointMode, CollectionFilter, Credentials, DcpConfig, DcpConfigBuilder,
     DcpMode, DcpPriority, FlowControlConfig, HealthCheckConfig, RollbackPolicy, SeedAddress,

@@ -370,7 +370,7 @@ impl Default for CheckpointConfig {
 }
 
 impl CheckpointConfig {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.timeout.is_zero() {
             return Err(DcpError::InvalidConfiguration(
                 "checkpoint timeout must be greater than zero".into(),
