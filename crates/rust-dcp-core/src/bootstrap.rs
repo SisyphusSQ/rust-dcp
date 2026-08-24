@@ -69,6 +69,17 @@ pub struct DcpConnection {
 }
 
 impl DcpConnection {
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        connection: KvConnection,
+        capabilities: BootstrapCapabilities,
+    ) -> Self {
+        Self {
+            connection,
+            capabilities,
+        }
+    }
+
     /// Negotiated connection capabilities.
     #[must_use]
     pub const fn capabilities(&self) -> &BootstrapCapabilities {

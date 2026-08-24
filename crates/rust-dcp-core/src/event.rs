@@ -49,7 +49,7 @@ impl SnapshotFlags {
     pub const ACK: Self = Self(0x08);
     /// Snapshot may contain historical values.
     pub const HISTORY: Self = Self(0x10);
-    /// Snapshot can contain duplicate sequence numbers.
+    /// Snapshot can contain multiple historical values for the same key.
     pub const MAY_CONTAIN_DUPLICATES: Self = Self(0x20);
 
     /// Preserves every bit supplied by the server.
@@ -260,8 +260,6 @@ pub enum SystemEventKind {
     },
     /// Collection properties changed.
     CollectionChanged {
-        /// Scope identifier.
-        scope_id: u32,
         /// Collection identifier.
         collection_id: u32,
         /// Optional maximum TTL seconds.

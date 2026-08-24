@@ -303,7 +303,7 @@ impl Default for FlowControlConfig {
 }
 
 impl FlowControlConfig {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.connection_buffer_size == 0 {
             return Err(DcpError::InvalidConfiguration(
                 "connection buffer size must be greater than zero".into(),

@@ -18,7 +18,7 @@ pub use command::{
     VBucketSeqNo, VBucketState, buffer_ack, close_stream, dcp_control, dcp_open,
     get_cluster_config, get_failover_log, get_vbucket_seqnos, hello, noop_response,
     parse_failover_log, parse_stream_request_response, parse_vbucket_seqnos, sasl_auth,
-    sasl_list_mechanisms, sasl_step, select_bucket, stream_request,
+    sasl_list_mechanisms, sasl_step, select_bucket, snapshot_marker_response, stream_request,
 };
 pub use dcp::{
     DcpDeletion, DcpExpiration, DcpMessage, DcpMutation, OsoSnapshot, OsoSnapshotState,

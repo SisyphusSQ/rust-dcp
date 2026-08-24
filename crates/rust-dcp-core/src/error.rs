@@ -85,6 +85,15 @@ pub enum DcpError {
     #[error("operation timed out after {0:?}")]
     Timeout(Duration),
 
+    /// No inbound frame arrived within the configured liveness window.
+    #[error("KV peer {peer} was silent for {idle_for:?}")]
+    DeadConnection {
+        /// Endpoint whose connection stopped making inbound progress.
+        peer: String,
+        /// Configured maximum idle duration.
+        idle_for: Duration,
+    },
+
     /// The subscription or client was cancelled.
     #[error("operation cancelled")]
     Cancelled,
