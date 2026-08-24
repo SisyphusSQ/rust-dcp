@@ -1,4 +1,7 @@
-use std::ops::{BitOr, BitOrAssign};
+use std::{
+    collections::BTreeSet,
+    ops::{BitOr, BitOrAssign},
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::Serialize;
@@ -197,6 +200,29 @@ impl StreamFilter {
             sid: Option<u16>,
         }
 
+        if self.scope_id.is_some() && !self.collection_ids.is_empty() {
+            return Err(ProtocolError::InvalidRequest(
+                "stream filter cannot select both a scope and collection IDs".into(),
+            ));
+        }
+        if self
+            .collection_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != self.collection_ids.len()
+        {
+            return Err(ProtocolError::InvalidRequest(
+                "stream filter collection IDs must be unique".into(),
+            ));
+        }
+        if self.stream_id == Some(0) {
+            return Err(ProtocolError::InvalidRequest(
+                "DCP stream ID must be non-zero".into(),
+            ));
+        }
+
         let wire = WireFilter {
             uid: self.manifest_uid.map(|value| format!("{value:x}")),
             collections: self
@@ -256,6 +282,15 @@ pub struct VBucketSeqNo {
     pub seqno: u64,
 }
 
+/// Identifiers returned by `COLLECTIONS_GET_ID`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollectionId {
+    /// Manifest containing the resolved collection.
+    pub manifest_uid: u64,
+    /// Collection identifier used by DCP filters and key prefixes.
+    pub collection_id: u32,
+}
+
 /// Builds a `HELLO` feature-negotiation request.
 #[must_use]
 pub fn hello(client_name: &str, features: &[HelloFeature], opaque: u32) -> Frame {
@@ -313,6 +348,29 @@ pub fn get_cluster_config(opaque: u32) -> Frame {
     let mut frame = Frame::request(Opcode::GET_CLUSTER_CONFIG);
     frame.opaque = opaque;
     frame
+}
+
+/// Builds a request for the current collection manifest.
+#[must_use]
+pub fn get_collection_manifest(opaque: u32) -> Frame {
+    let mut frame = Frame::request(Opcode::COLLECTIONS_GET_MANIFEST);
+    frame.opaque = opaque;
+    frame
+}
+
+/// Builds a request that resolves one `scope.collection` name.
+///
+/// # Errors
+///
+/// Returns a protocol error when the name cannot be represented by this wire
+/// command.
+pub fn get_collection_id(scope: &str, collection: &str, opaque: u32) -> Result<Frame> {
+    validate_collection_name("scope", scope)?;
+    validate_collection_name("collection", collection)?;
+    let mut frame = Frame::request(Opcode::COLLECTIONS_GET_ID);
+    frame.value = Bytes::from(format!("{scope}.{collection}"));
+    frame.opaque = opaque;
+    Ok(frame)
 }
 
 /// Builds a DCP connection-open request.
@@ -514,6 +572,52 @@ pub fn parse_vbucket_seqnos(frame: &Frame) -> Result<Vec<VBucketSeqNo>> {
         .collect())
 }
 
+/// Parses a successful collection-ID response.
+///
+/// # Errors
+///
+/// Returns a protocol error for the wrong opcode, a non-success status, or
+/// response extras whose length is not exactly 12 bytes.
+pub fn parse_collection_id(frame: &Frame) -> Result<CollectionId> {
+    ensure_response(frame, Opcode::COLLECTIONS_GET_ID)?;
+    if frame.extras.len() != 12 {
+        return Err(ProtocolError::MalformedFrame(format!(
+            "collection-ID response extras must contain 12 bytes, got {}",
+            frame.extras.len()
+        )));
+    }
+    let manifest_uid = frame
+        .extras
+        .get(..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_be_bytes)
+        .ok_or_else(|| {
+            ProtocolError::MalformedFrame("collection-ID manifest UID is malformed".into())
+        })?;
+    let collection_id = frame
+        .extras
+        .get(8..12)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .ok_or_else(|| {
+            ProtocolError::MalformedFrame("collection-ID numeric ID is malformed".into())
+        })?;
+    Ok(CollectionId {
+        manifest_uid,
+        collection_id,
+    })
+}
+
+/// Returns the JSON payload from a successful collection-manifest response.
+///
+/// # Errors
+///
+/// Returns a protocol error for the wrong opcode or a non-success status.
+pub fn parse_collection_manifest(frame: &Frame) -> Result<&[u8]> {
+    ensure_response(frame, Opcode::COLLECTIONS_GET_MANIFEST)?;
+    Ok(&frame.value)
+}
+
 fn parse_failover_entries(value: &[u8]) -> Result<Vec<FailoverEntry>> {
     if value.len() % 16 != 0 {
         return Err(ProtocolError::MalformedDcp(format!(
@@ -533,6 +637,23 @@ fn parse_failover_entries(value: &[u8]) -> Result<Vec<FailoverEntry>> {
             ]),
         })
         .collect())
+}
+
+fn validate_collection_name(kind: &str, name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 251 {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{kind} name must contain between 1 and 251 ASCII characters"
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'%'))
+    {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{kind} name contains a character unsupported by Couchbase collections"
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_response(frame: &Frame, opcode: Opcode) -> Result<()> {
@@ -633,6 +754,44 @@ mod tests {
     }
 
     #[test]
+    fn stream_request_rejects_ambiguous_collection_filters() {
+        let request_with = |filter| StreamRequest {
+            vbucket: 0,
+            flags: DcpStreamFlags::default(),
+            vbucket_uuid: 0,
+            start_seqno: 0,
+            end_seqno: u64::MAX,
+            snapshot_start: 0,
+            snapshot_end: 0,
+            filter: Some(filter),
+            opaque: 0,
+        };
+
+        assert!(
+            stream_request(&request_with(StreamFilter {
+                scope_id: Some(8),
+                collection_ids: vec![9],
+                ..StreamFilter::default()
+            }))
+            .is_err()
+        );
+        assert!(
+            stream_request(&request_with(StreamFilter {
+                collection_ids: vec![9, 9],
+                ..StreamFilter::default()
+            }))
+            .is_err()
+        );
+        assert!(
+            stream_request(&request_with(StreamFilter {
+                stream_id: Some(0),
+                ..StreamFilter::default()
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn rollback_response_is_not_treated_as_generic_failure() {
         let mut frame = Frame::response(Opcode::DCP_STREAM_REQUEST, Status::ROLLBACK);
         frame.value = Bytes::copy_from_slice(&123_u64.to_be_bytes());
@@ -670,6 +829,50 @@ mod tests {
                 seqno: 999
             }]
         );
+    }
+
+    #[test]
+    fn collection_metadata_requests_match_the_memcached_wire_contract() {
+        let manifest = get_collection_manifest(17);
+        assert_eq!(manifest.opcode, Opcode::COLLECTIONS_GET_MANIFEST);
+        assert!(manifest.key.is_empty());
+        assert!(manifest.value.is_empty());
+        assert_eq!(manifest.opaque, 17);
+
+        let collection = get_collection_id("inventory", "airline", 18).unwrap();
+        assert_eq!(collection.opcode, Opcode::COLLECTIONS_GET_ID);
+        assert!(collection.key.is_empty());
+        assert_eq!(&collection.value[..], b"inventory.airline");
+        assert_eq!(collection.opaque, 18);
+    }
+
+    #[test]
+    fn collection_id_request_rejects_unrepresentable_names() {
+        assert!(get_collection_id("_default", "_default", 0).is_ok());
+        assert!(get_collection_id("", "airline", 0).is_err());
+        assert!(get_collection_id("inventory", "air.line", 0).is_err());
+        assert!(get_collection_id("inventory", "white space", 0).is_err());
+        assert!(get_collection_id("inventory", &"a".repeat(252), 0).is_err());
+    }
+
+    #[test]
+    fn collection_id_response_requires_exact_big_endian_extras() {
+        let mut response = Frame::response(Opcode::COLLECTIONS_GET_ID, Status::SUCCESS);
+        let mut extras = BytesMut::new();
+        extras.put_u64(0xfeed_beef);
+        extras.put_u32(0xcafe);
+        response.extras = extras.freeze();
+
+        assert_eq!(
+            parse_collection_id(&response).unwrap(),
+            CollectionId {
+                manifest_uid: 0xfeed_beef,
+                collection_id: 0xcafe,
+            }
+        );
+
+        response.extras = Bytes::from_static(&[0; 11]);
+        assert!(parse_collection_id(&response).is_err());
     }
 
     #[test]

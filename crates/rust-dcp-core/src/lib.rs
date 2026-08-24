@@ -8,6 +8,7 @@ mod bootstrap;
 mod checkpoint;
 mod checkpoint_runtime;
 mod checkpoint_store;
+mod collections;
 mod config;
 mod error;
 mod event;
@@ -29,6 +30,12 @@ pub use checkpoint_runtime::{
 pub use checkpoint_store::{
     CheckpointStore, CheckpointStoreFuture, CouchbaseCheckpointCollection,
     CouchbaseCheckpointStore, FileCheckpointStore,
+};
+pub use collections::{
+    CollectionManifest, CollectionRegistry, CollectionRegistryStatus, CollectionSelection,
+    CollectionStream, ManifestCollection, ManifestScope, ResolvedCollectionFilter,
+    fetch_collection_manifest, fetch_selection_high_seqnos, resolve_collection_id,
+    resolve_collection_selection,
 };
 pub use config::{
     CheckpointConfig, CheckpointMode, CollectionFilter, Credentials, DcpConfig, DcpConfigBuilder,
