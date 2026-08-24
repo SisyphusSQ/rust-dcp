@@ -20,8 +20,10 @@ pub use command::{
     get_cluster_config, get_collection_id, get_collection_manifest, get_document, get_failover_log,
     get_vbucket_seqnos, hello, noop_response, observe_seqno, parse_collection_id,
     parse_collection_manifest, parse_failover_log, parse_observe_seqno,
-    parse_stream_request_response, parse_vbucket_seqnos, sasl_auth, sasl_list_mechanisms,
-    sasl_step, select_bucket, snapshot_marker_response, store_document, stream_request,
+    parse_stream_request_response, parse_subdoc_get_xattr, parse_subdoc_mutation,
+    parse_vbucket_seqnos, sasl_auth, sasl_list_mechanisms, sasl_step, select_bucket,
+    snapshot_marker_response, store_document, stream_request, subdoc_get_xattr,
+    subdoc_upsert_xattr,
 };
 pub use dcp::{
     DcpDeletion, DcpExpiration, DcpMessage, DcpMutation, OsoSnapshot, OsoSnapshotState,

@@ -6,6 +6,7 @@ mod assignment;
 mod auth;
 mod bootstrap;
 mod checkpoint;
+mod checkpoint_couchbase;
 mod checkpoint_runtime;
 mod checkpoint_store;
 mod client;
@@ -26,6 +27,9 @@ pub use bootstrap::{
     bootstrap_kv_connection, bootstrap_kv_on_connection, bootstrap_on_connection,
 };
 pub use checkpoint::{DcpCheckpoint, FailoverEntry};
+pub use checkpoint_couchbase::{
+    CouchbaseCheckpointCollectionSpec, CouchbaseKvCheckpointCollection,
+};
 pub use checkpoint_runtime::{
     AckOutcome, CheckpointCoordinator, CheckpointFlushReport, CheckpointMetrics, CheckpointStream,
     CheckpointStreamItem, EventAck, PartitionCheckpointStatus, TrackedEvent, load_checkpoints,

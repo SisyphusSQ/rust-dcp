@@ -131,6 +131,10 @@ impl Opcode {
     pub const COLLECTIONS_GET_MANIFEST: Self = Self(0xba);
     /// Resolve a scope/collection identifier.
     pub const COLLECTIONS_GET_ID: Self = Self(0xbb);
+    /// Execute one or more sub-document lookups.
+    pub const SUBDOC_MULTI_LOOKUP: Self = Self(0xd0);
+    /// Execute one or more sub-document mutations.
+    pub const SUBDOC_MULTI_MUTATION: Self = Self(0xd1);
 
     /// Raw opcode byte.
     #[must_use]
@@ -188,6 +192,10 @@ impl Status {
     pub const COLLECTION_UNKNOWN: Self = Self(0x88);
     /// Scope identifier is unknown.
     pub const SCOPE_UNKNOWN: Self = Self(0x8c);
+    /// A requested sub-document path does not exist.
+    pub const SUBDOC_PATH_NOT_FOUND: Self = Self(0xc0);
+    /// At least one operation in a multi-path request failed.
+    pub const SUBDOC_MULTI_PATH_FAILURE: Self = Self(0xcc);
 
     /// Raw status value.
     #[must_use]
