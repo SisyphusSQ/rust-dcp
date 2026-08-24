@@ -28,9 +28,15 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! The same official SDK collection can back Couchbase membership by wrapping it with
+//! [`CouchbaseSdkMembershipStore`] and passing the result to
+//! `rust_dcp_membership_couchbase::CouchbaseMembership::with_store`.
 
 #![forbid(unsafe_code)]
 
 mod checkpoint;
+mod membership;
 
 pub use checkpoint::CouchbaseSdkCheckpointCollection;
+pub use membership::CouchbaseSdkMembershipStore;

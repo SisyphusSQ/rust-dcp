@@ -1992,6 +1992,7 @@ dependencies = [
  "bytes",
  "couchbase",
  "rust-dcp-core",
+ "rust-dcp-membership-couchbase",
  "tokio",
 ]
 

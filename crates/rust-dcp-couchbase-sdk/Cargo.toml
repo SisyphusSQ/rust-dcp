@@ -11,6 +11,7 @@ authors.workspace = true
 bytes.workspace = true
 couchbase.workspace = true
 rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+rust-dcp-membership-couchbase = { path = "../rust-dcp-membership-couchbase", version = "0.1.0" }
 
 [dev-dependencies]
 tokio.workspace = true
