@@ -30,6 +30,7 @@ An “implemented” row is not a claim that every listed Couchbase Server relea
 | Datatype and XATTR | DCP XATTR inclusion and raw event data | Negotiates XATTR, opens DCP with include-XATTR when supported, preserves datatype/future bits, and exposes raw XATTR-framed bytes | Implemented and unit-tested; XATTR body splitting remains application-owned |
 | Snappy | SDK decompression | Negotiates Snappy/SnappyEverywhere, bounds decompressed size, decompresses before DCP parsing, and clears only the Snappy datatype bit | Implemented and unit-tested |
 | Start position | Earliest/latest and persisted offsets | `StartPosition::Earliest`, `Latest`, or explicit checkpoint; durable store values take precedence per vBucket | Implemented and unit-tested |
+| Listener skip-until | `dcp.listener.skipUntil` filters document events by CAS-derived event time | `ListenerConfig::skip_until` applies the same whole-second CAS cutoff to mutation/deletion/expiration; skipped documents are internally acknowledged so checkpoint progress does not replay forever | Implemented and unit-tested; control/progress/system events remain visible |
 | Finite/infinite mode | Finite snapshot or continuous stream | Finite mode freezes initial high seqnos across reconnects; infinite mode continues until close/error | Implemented and unit-tested |
 | High seqno and failover log | Reads partition metadata before/opening streams | Typed high-seqno and newest-first failover-log commands with response validation | Implemented and unit-tested |
 | Flow control | Connection buffer ACKs | Buffer credit is returned after bounded runtime admission, independently from processing and checkpoint durability | Implemented and unit-tested; explicit lifecycle separation |
@@ -43,6 +44,8 @@ An “implemented” row is not a claim that every listed Couchbase Server relea
 | File checkpoint | File metadata backend | Atomic fsync/rename, go-dcp-compatible JSON schema, bucket UUID checks, and malformed-file errors | Implemented and unit-tested |
 | Couchbase checkpoint | `_connector:cbgo:{group}:checkpoint:{vb}` document with `cbgo` XATTR | Same key, XATTR, and JSON schema; built-in Tokio KV routing supports default or named collection and idempotent delete | Implemented and unit-tested; live KV/XATTR E2E deferred |
 | Custom checkpoint | Custom metadata implementation | Object-safe async `CheckpointStore`; lower-level `CouchbaseCheckpointCollection` adapter is also replaceable | Implemented and unit-tested |
+| Noop checkpoint | `metadata.type: noop` returns empty state and accepts writes/clears | `NoopCheckpointStore` returns no stored vBuckets and accepts save/clear without persistence | Implemented and unit-tested |
+| Read-only checkpoint | `metadata.readOnly: true` delegates load and suppresses save/clear | `ReadOnlyCheckpointStore` wraps any async store, delegates load, and suppresses save/clear | Implemented and unit-tested |
 | Standalone assignment | One consumer can own the complete vBucket set | `AssignmentMode::Standalone` follows the current topology | Implemented and unit-tested |
 | External/static assignment | Static/dynamic membership can provide a partition slice | `VBucketAssignment` carries an explicit monotonic generation fence | Implemented and unit-tested; subscription replacement remains orchestrator-owned |
 | Couchbase membership | Couchbase-coordinated group membership | Separate crate with CAS registry, heartbeat, stale pruning, incarnation fencing, deterministic rebalance, and built-in Tokio KV store | Implemented and unit-tested; live coordination E2E deferred |
@@ -68,7 +71,7 @@ The final code-bearing branch was validated before its commit/PR stage with:
 
 ```text
 K8S_OPENAPI_ENABLED_VERSION=1.30 cargo test --workspace --all-features
-190 tests passed; 0 failed
+194 tests passed; 0 failed
 
 K8S_OPENAPI_ENABLED_VERSION=1.30 cargo clippy \
   --workspace --all-targets --all-features -- -D warnings
@@ -79,7 +82,7 @@ K8S_OPENAPI_ENABLED_VERSION=1.30 RUSTDOCFLAGS='-D warnings' \
   cargo doc --workspace --all-features --no-deps
 ```
 
-The test suite includes Tokio duplex/mock transports, exact packet layouts, malformed responses, SASL/SCRAM vectors, TLS root handling, Snappy limits, topology revisions, stream reopen and rollback paths, rollback mitigation, checkpoint failure/races, collection manifest/system events, lifecycle cancellation, health/metrics, and membership fencing.
+The test suite includes Tokio duplex/mock transports, exact packet layouts, malformed responses, SASL/SCRAM vectors, TLS root handling, Snappy limits, topology revisions, stream reopen and rollback paths, rollback mitigation, listener cutoff/checkpoint progress, checkpoint failure/races and noop/read-only adapters, collection manifest/system events, lifecycle cancellation, health/metrics, and membership fencing.
 
 No test in this evidence block contacted a live Couchbase Server.
 

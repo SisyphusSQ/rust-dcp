@@ -27,14 +27,15 @@ pub use rust_dcp_core::{
     DcpHealthSnapshot, DcpHealthStatus, DcpMetrics, DcpMetricsSnapshot, DcpMode, DcpMutation,
     DcpPriority, DcpStream, DcpStreamFlags, DcpStreamItem, DcpSubscription, DcpSubscriptionSpec,
     EventAck, FailoverEntry, FileCheckpointStore, FlowControlConfig, HealthCheckConfig,
-    ManifestCollection, ManifestScope, OsoSnapshot, OsoSnapshotState, PartitionCheckpointStatus,
-    PartitionOpenState, ResolvedCollectionFilter, Result, RollbackAction, RollbackApplied,
-    RollbackHandler, RollbackMitigationConfig, RollbackPolicy, RollbackRequest, SeedAddress,
-    SeqNoAdvanced, SnapshotFlags, SnapshotMarker, StartPosition, StreamEnd, StreamEndReason,
-    StreamFilter, StreamOpenReport, SystemEvent, SystemEventKind, TlsConfig, TopologyNetwork,
-    TrackedEvent, VBucketAssignment, VBucketStreamRequest, bootstrap_connection,
-    fetch_collection_manifest, fetch_selection_high_seqnos, load_checkpoints, open_dcp_stream,
-    resolve_collection_id, resolve_collection_selection,
+    ListenerConfig, ManifestCollection, ManifestScope, NoopCheckpointStore, OsoSnapshot,
+    OsoSnapshotState, PartitionCheckpointStatus, PartitionOpenState, ReadOnlyCheckpointStore,
+    ResolvedCollectionFilter, Result, RollbackAction, RollbackApplied, RollbackHandler,
+    RollbackMitigationConfig, RollbackPolicy, RollbackRequest, SeedAddress, SeqNoAdvanced,
+    SnapshotFlags, SnapshotMarker, StartPosition, StreamEnd, StreamEndReason, StreamFilter,
+    StreamOpenReport, SystemEvent, SystemEventKind, TlsConfig, TopologyNetwork, TrackedEvent,
+    VBucketAssignment, VBucketStreamRequest, bootstrap_connection, fetch_collection_manifest,
+    fetch_selection_high_seqnos, load_checkpoints, open_dcp_stream, resolve_collection_id,
+    resolve_collection_selection,
 };
 
 #[cfg(feature = "prometheus")]

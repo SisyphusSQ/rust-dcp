@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{Stream, StreamExt, stream::SelectAll};
@@ -1657,6 +1657,24 @@ async fn handle_stream_item(
             if let Some(action) = wait_for_mitigation(runtime, &event).await {
                 return Some(action);
             }
+            if document_is_before_listener_cutoff(&runtime.config, &event) {
+                let vbucket = event.vbucket();
+                let seqno = event.seqno();
+                let tracked = match runtime.coordinator.track_event(event) {
+                    Ok(tracked) => tracked,
+                    Err(error) => return Some(GenerationAction::Fatal(error)),
+                };
+                if let Err(error) = tracked.acknowledge() {
+                    return Some(GenerationAction::Fatal(error));
+                }
+                tracing::trace!(
+                    vbucket,
+                    ?seqno,
+                    ?runtime.config.listener.skip_until,
+                    "skipped DCP document event before listener cutoff"
+                );
+                return None;
+            }
             let registry = match lock_registry(&runtime.registry) {
                 Ok(registry) => registry.clone(),
                 Err(error) => return Some(GenerationAction::Fatal(error)),
@@ -1723,6 +1741,29 @@ async fn handle_stream_item(
         OutputDisposition::Stop => Some(GenerationAction::Stop),
         OutputDisposition::Reopen(snapshot) => Some(GenerationAction::Reopen(snapshot)),
     }
+}
+
+fn document_is_before_listener_cutoff(config: &DcpConfig, event: &DcpEvent) -> bool {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+    let Some(skip_until) = config.listener.skip_until else {
+        return false;
+    };
+    let cas = match event {
+        DcpEvent::Mutation(event) => event.cas,
+        DcpEvent::Deletion(event) => event.cas,
+        DcpEvent::Expiration(event) => event.cas,
+        DcpEvent::SnapshotMarker(_)
+        | DcpEvent::StreamEnd(_)
+        | DcpEvent::SeqNoAdvanced(_)
+        | DcpEvent::SystemEvent(_)
+        | DcpEvent::OsoSnapshot(_) => return false,
+    };
+    let Ok(cutoff_from_epoch) = skip_until.duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let event_time = Duration::from_secs(cas / NANOS_PER_SECOND);
+    cutoff_from_epoch > event_time
 }
 
 async fn wait_for_mitigation(
@@ -2025,6 +2066,7 @@ mod tests {
         time::Duration,
     };
 
+    use bytes::Bytes;
     use futures_util::StreamExt;
     use tokio::sync::mpsc;
 
@@ -2391,14 +2433,65 @@ mod tests {
     }
 
     fn snapshot(vbucket: u16, seqno: u64) -> DcpStreamItem {
+        snapshot_range(vbucket, seqno, seqno)
+    }
+
+    fn snapshot_range(vbucket: u16, start_seqno: u64, end_seqno: u64) -> DcpStreamItem {
         DcpStreamItem::Event(DcpEvent::SnapshotMarker(SnapshotMarker {
             vbucket,
-            start_seqno: seqno,
-            end_seqno: seqno,
+            start_seqno,
+            end_seqno,
             flags: SnapshotFlags::MEMORY,
             high_completed_seqno: None,
             max_visible_seqno: None,
             purge_seqno: None,
+        }))
+    }
+
+    fn mutation(vbucket: u16, seqno: u64, cas: u64) -> DcpStreamItem {
+        DcpStreamItem::Event(DcpEvent::Mutation(crate::DcpMutation {
+            vbucket,
+            seqno,
+            rev_seqno: 1,
+            flags: 0,
+            expiry: 0,
+            lock_time: 0,
+            cas,
+            datatype: crate::DataType::default(),
+            collection_id: Some(0),
+            collection_name: None,
+            key: Bytes::from_static(b"mutation"),
+            value: Bytes::new(),
+        }))
+    }
+
+    fn deletion(vbucket: u16, seqno: u64, cas: u64) -> DcpStreamItem {
+        DcpStreamItem::Event(DcpEvent::Deletion(crate::DcpDeletion {
+            vbucket,
+            seqno,
+            rev_seqno: 2,
+            delete_time: None,
+            cas,
+            collection_id: Some(0),
+            collection_name: None,
+            key: Bytes::from_static(b"deletion"),
+            value: Bytes::new(),
+            datatype: crate::DataType::default(),
+        }))
+    }
+
+    fn expiration(vbucket: u16, seqno: u64, cas: u64) -> DcpStreamItem {
+        DcpStreamItem::Event(DcpEvent::Expiration(crate::DcpExpiration {
+            vbucket,
+            seqno,
+            rev_seqno: 3,
+            delete_time: None,
+            cas,
+            collection_id: Some(0),
+            collection_name: None,
+            key: Bytes::from_static(b"expiration"),
+            value: Bytes::new(),
+            datatype: crate::DataType::default(),
         }))
     }
 
@@ -2473,6 +2566,50 @@ mod tests {
 
         subscription.close().await.unwrap();
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_skip_until_filters_documents_and_advances_checkpoint_progress() {
+        let (generation, sender, _) = opened_generation(checkpoint(0, 11));
+        let backend = Arc::new(FakeBackend::new([Ok(topology(7))], [Ok(generation)]));
+        let mut dcp_config = config(StartPosition::Earliest);
+        dcp_config.listener.skip_until = Some(std::time::UNIX_EPOCH + Duration::from_secs(20));
+        let client = DcpClient::connect_with_backend(dcp_config, backend as Arc<dyn ClientBackend>)
+            .await
+            .unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let mut subscription = client
+            .subscribe(DcpSubscriptionSpec::standalone(
+                Arc::clone(&store) as Arc<dyn CheckpointStore>
+            ))
+            .await
+            .unwrap();
+
+        sender.send(Ok(snapshot_range(0, 1, 4))).unwrap();
+        sender.send(Ok(mutation(0, 1, 19_999_999_999))).unwrap();
+        sender.send(Ok(deletion(0, 2, 19_000_000_000))).unwrap();
+        sender.send(Ok(expiration(0, 3, 19_000_000_000))).unwrap();
+        sender.send(Ok(mutation(0, 4, 20_000_000_000))).unwrap();
+
+        let marker = next_delivery(&mut subscription).await;
+        assert!(matches!(marker.event(), DcpEvent::SnapshotMarker(_)));
+        let boundary = next_delivery(&mut subscription).await;
+        assert!(matches!(
+            boundary.event(),
+            DcpEvent::Mutation(event) if event.seqno == 4
+        ));
+        let before_ack = subscription.checkpoint_statuses().unwrap();
+        assert_eq!(before_ack[&0].processed.seqno, 3);
+        assert_eq!(before_ack[&0].pending_events, 1);
+
+        boundary.mark_processed().await.unwrap();
+        subscription.flush().await.unwrap();
+        assert_eq!(store.checkpoints.lock().unwrap()[&0].seqno, 4);
+        assert_eq!(client.metrics().snapshot().delivered_events, 2);
+        assert_eq!(client.metrics().snapshot().processed_events, 1);
+
+        subscription.close().await.unwrap();
         client.close().await.unwrap();
     }
 

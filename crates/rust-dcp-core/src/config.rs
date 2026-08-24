@@ -1,4 +1,11 @@
-use std::{fmt, net::Ipv6Addr, num::NonZeroUsize, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    fmt,
+    net::Ipv6Addr,
+    num::NonZeroUsize,
+    path::PathBuf,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -491,6 +498,15 @@ impl HealthCheckConfig {
     }
 }
 
+/// Application-delivery filters applied by the high-level listener runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ListenerConfig {
+    /// Skips mutation, deletion, and expiration events whose CAS-derived event
+    /// time is before this cutoff. Control, progress, and system events remain
+    /// visible.
+    pub skip_until: Option<SystemTime>,
+}
+
 /// Complete configuration for one DCP client.
 #[derive(Clone, Debug)]
 pub struct DcpConfig {
@@ -506,6 +522,8 @@ pub struct DcpConfig {
     pub mode: DcpMode,
     /// Initial position when no store entry exists.
     pub start_from: StartPosition,
+    /// Application-delivery filtering.
+    pub listener: ListenerConfig,
     /// DCP flow-control settings.
     pub flow_control: FlowControlConfig,
     /// Checkpoint behavior.
@@ -540,6 +558,7 @@ impl DcpConfig {
                 collections: CollectionFilter::default(),
                 mode: DcpMode::default(),
                 start_from: StartPosition::default(),
+                listener: ListenerConfig::default(),
                 flow_control: FlowControlConfig::default(),
                 checkpoint: CheckpointConfig::default(),
                 rollback_policy: RollbackPolicy::default(),
@@ -636,6 +655,13 @@ impl DcpConfigBuilder {
     #[must_use]
     pub fn start_from(mut self, position: StartPosition) -> Self {
         self.config.start_from = position;
+        self
+    }
+
+    /// Replaces application-listener filtering settings.
+    #[must_use]
+    pub const fn listener(mut self, listener: ListenerConfig) -> Self {
+        self.config.listener = listener;
         self
     }
 
@@ -750,6 +776,22 @@ mod tests {
             config.seeds[0].with_default_kv_port(false),
             "cb.example.test:11210"
         );
+        assert_eq!(config.listener, ListenerConfig::default());
+    }
+
+    #[test]
+    fn builder_configures_the_listener_skip_until_cutoff() {
+        let cutoff = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let config = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+            .seed("cb.example.test")
+            .unwrap()
+            .listener(ListenerConfig {
+                skip_until: Some(cutoff),
+            })
+            .build()
+            .unwrap();
+
+        assert_eq!(config.listener.skip_until, Some(cutoff));
     }
 
     #[test]
