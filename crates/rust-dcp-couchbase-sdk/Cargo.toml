@@ -1,0 +1,19 @@
+[package]
+name = "rust-dcp-couchbase-sdk"
+description = "Official Couchbase Rust SDK adapters for rust-dcp metadata operations"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.90"
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes.workspace = true
+couchbase.workspace = true
+rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

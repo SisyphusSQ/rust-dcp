@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/rust-dcp",
+    "crates/rust-dcp-couchbase-sdk",
     "crates/rust-dcp-core",
     "crates/rust-dcp-membership-couchbase",
     "crates/rust-dcp-membership-kubernetes",
@@ -18,6 +19,7 @@ authors = ["SisyphusSQ"]
 
 [workspace.dependencies]
 bytes = { version = "1.10", features = ["serde"] }
+couchbase = "=1.0.2"
 base64 = "0.22"
 crc32fast = "1.5"
 futures-util = { version = "0.3", features = ["sink"] }
