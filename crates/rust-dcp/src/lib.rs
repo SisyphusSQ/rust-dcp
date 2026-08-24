@@ -36,3 +36,6 @@ pub use rust_dcp_core::{
     fetch_collection_manifest, fetch_selection_high_seqnos, load_checkpoints, open_dcp_stream,
     resolve_collection_id, resolve_collection_selection,
 };
+
+#[cfg(feature = "prometheus")]
+pub use rust_dcp_prometheus::DcpPrometheusCollector;
