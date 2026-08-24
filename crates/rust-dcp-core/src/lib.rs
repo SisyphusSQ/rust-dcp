@@ -21,8 +21,8 @@ mod transport;
 pub use assignment::{AssignmentMode, VBucketAssignment};
 pub use auth::{SaslMechanism, ScramAlgorithm};
 pub use bootstrap::{
-    BootstrapCapabilities, DcpConnection, DcpControlFeature, bootstrap_connection,
-    bootstrap_on_connection,
+    BootstrapCapabilities, DcpConnection, DcpControlFeature, KvSession, bootstrap_connection,
+    bootstrap_kv_connection, bootstrap_kv_on_connection, bootstrap_on_connection,
 };
 pub use checkpoint::{DcpCheckpoint, FailoverEntry};
 pub use checkpoint_runtime::{
@@ -61,6 +61,7 @@ pub use stream::{
 };
 pub use topology::{
     ClusterTopology, KvEndpoint, NodeId, TopologyChange, TopologyNetwork, TopologyRevision,
-    TopologyState, discover_topology, fetch_active_high_seqnos, fetch_failover_log,
+    TopologyState, couchbase_vbucket_for_key, discover_topology, fetch_active_high_seqnos,
+    fetch_failover_log,
 };
 pub use transport::{AsyncIo, BoxedIo, KvConnection};

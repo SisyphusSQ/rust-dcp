@@ -116,6 +116,31 @@ pub enum TopologyNetwork {
     Named(String),
 }
 
+/// Maps a user document key to a Couchbase vBucket using the SDK-compatible
+/// CRC32 algorithm.
+///
+/// # Errors
+///
+/// Returns a configuration error when `vbucket_count` is zero or cannot be
+/// represented by the 16-bit Couchbase vBucket field.
+pub fn couchbase_vbucket_for_key(key: &[u8], vbucket_count: usize) -> Result<u16> {
+    let max_vbucket_count = usize::from(u16::MAX) + 1;
+    if vbucket_count == 0 || vbucket_count > max_vbucket_count {
+        return Err(DcpError::InvalidConfiguration(format!(
+            "vBucket count must be in 1..={max_vbucket_count}"
+        )));
+    }
+    let hash = (crc32fast::hash(key) >> 16) & 0x7fff;
+    let vbucket = usize::try_from(hash).map_err(|error| {
+        DcpError::InvalidConfiguration(format!("Couchbase CRC cannot fit usize: {error}"))
+    })? % vbucket_count;
+    u16::try_from(vbucket).map_err(|error| {
+        DcpError::InvalidConfiguration(format!(
+            "vBucket identifier {vbucket} cannot be represented: {error}"
+        ))
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VBucketRoute {
     active: NodeId,
@@ -1151,6 +1176,21 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn couchbase_crc_maps_keys_to_gocbcore_compatible_vbuckets() {
+        assert_eq!(
+            couchbase_vbucket_for_key(b"membership", 1_024).unwrap(),
+            767
+        );
+        assert_eq!(couchbase_vbucket_for_key(b"hello", 1_024).unwrap(), 528);
+        assert_eq!(
+            couchbase_vbucket_for_key(b"travel-sample", 1_024).unwrap(),
+            86
+        );
+        assert!(couchbase_vbucket_for_key(b"key", 0).is_err());
+        assert!(couchbase_vbucket_for_key(b"key", 65_537).is_err());
     }
 
     #[tokio::test]

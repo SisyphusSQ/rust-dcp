@@ -68,6 +68,34 @@ pub struct DcpConnection {
     capabilities: BootstrapCapabilities,
 }
 
+/// Authenticated and bucket-selected normal KV connection.
+#[derive(Debug)]
+pub struct KvSession {
+    connection: KvConnection,
+    capabilities: BootstrapCapabilities,
+}
+
+impl KvSession {
+    /// Negotiated connection capabilities. DCP controls are empty because a
+    /// normal KV session does not issue `DCP_OPEN`.
+    #[must_use]
+    pub const fn capabilities(&self) -> &BootstrapCapabilities {
+        &self.capabilities
+    }
+
+    /// Mutable access for normal KV and metadata commands.
+    #[must_use]
+    pub fn connection_mut(&mut self) -> &mut KvConnection {
+        &mut self.connection
+    }
+
+    /// Releases the authenticated KV connection.
+    #[must_use]
+    pub fn into_inner(self) -> KvConnection {
+        self.connection
+    }
+}
+
 impl DcpConnection {
     #[cfg(test)]
     pub(crate) fn from_test_parts(
@@ -137,24 +165,50 @@ pub async fn bootstrap_connection(
     )))
 }
 
-/// Performs HELLO, SASL, bucket selection, DCP open, and DCP controls on an
-/// already established Tokio connection.
-///
-/// This entry point supports custom transports and deterministic unit tests.
+/// Connects to the configured seeds and performs HELLO, SASL authentication,
+/// and bucket selection without opening a DCP connection.
 ///
 /// # Errors
 ///
-/// Returns a protocol, authentication, server-status, or configuration error
-/// when any required bootstrap step fails.
-pub async fn bootstrap_on_connection(
+/// Returns a configuration error before dialing, or a summarized bootstrap
+/// error after all configured seeds fail.
+pub async fn bootstrap_kv_connection(config: &DcpConfig, client_name: &str) -> Result<KvSession> {
+    config.validate()?;
+    validate_name("HELLO client", client_name)?;
+
+    let mut failures = Vec::with_capacity(config.seeds.len());
+    for seed in &config.seeds {
+        let peer = seed.with_default_kv_port(config.tls.enabled);
+        match KvConnection::connect(seed, &config.tls, config.connect_timeout).await {
+            Ok(connection) => {
+                match bootstrap_kv_on_connection(connection, config, client_name).await {
+                    Ok(connection) => return Ok(connection),
+                    Err(error) => failures.push(format!("{peer}: {error}")),
+                }
+            }
+            Err(error) => failures.push(format!("{peer}: {error}")),
+        }
+    }
+
+    Err(DcpError::Topology(format!(
+        "all KV seeds failed bootstrap: {}",
+        failures.join("; ")
+    )))
+}
+
+/// Performs HELLO, SASL authentication, and bucket selection on an already
+/// established Tokio connection without issuing `DCP_OPEN`.
+///
+/// # Errors
+///
+/// Returns a protocol, authentication, server-status, or configuration error.
+pub async fn bootstrap_kv_on_connection(
     mut connection: KvConnection,
     config: &DcpConfig,
     client_name: &str,
-    connection_name: &str,
-) -> Result<DcpConnection> {
+) -> Result<KvSession> {
     config.validate()?;
     validate_name("HELLO client", client_name)?;
-    validate_name("DCP connection", connection_name)?;
 
     let hello_response = connection
         .request(hello(client_name, REQUESTED_HELLO_FEATURES, 0))
@@ -166,6 +220,43 @@ pub async fn bootstrap_on_connection(
     let sasl_mechanism = authenticate(&mut connection, &config.credentials).await?;
     let response = connection.request(select_bucket(&config.bucket, 0)).await?;
     ensure_success(&response, Opcode::SELECT_BUCKET, "bucket selection")?;
+
+    Ok(KvSession {
+        connection,
+        capabilities: BootstrapCapabilities {
+            hello_features,
+            sasl_mechanism,
+            dcp_controls: BTreeSet::new(),
+        },
+    })
+}
+
+/// Performs HELLO, SASL, bucket selection, DCP open, and DCP controls on an
+/// already established Tokio connection.
+///
+/// This entry point supports custom transports and deterministic unit tests.
+///
+/// # Errors
+///
+/// Returns a protocol, authentication, server-status, or configuration error
+/// when any required bootstrap step fails.
+pub async fn bootstrap_on_connection(
+    connection: KvConnection,
+    config: &DcpConfig,
+    client_name: &str,
+    connection_name: &str,
+) -> Result<DcpConnection> {
+    validate_name("DCP connection", connection_name)?;
+    let kv = bootstrap_kv_on_connection(connection, config, client_name).await?;
+    let KvSession {
+        mut connection,
+        capabilities,
+    } = kv;
+    let BootstrapCapabilities {
+        hello_features,
+        sasl_mechanism,
+        ..
+    } = capabilities;
 
     let mut open_flags = DcpOpenFlags::default();
     if hello_features.contains(&HelloFeature::Xattr) {
@@ -456,6 +547,55 @@ mod tests {
         assert_eq!(controls.get("set_priority").unwrap(), "medium");
         assert_eq!(controls.get("connection_buffer_size").unwrap(), "20971520");
         assert_eq!(controls.get("set_noop_interval").unwrap(), "20");
+    }
+
+    #[tokio::test]
+    async fn kv_bootstrap_authenticates_and_selects_bucket_without_opening_dcp() {
+        let (client_io, server_io) = duplex(16 * 1024);
+        let connection = KvConnection::from_io(client_io, "unit-test", Duration::from_secs(1));
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(server_io, FrameCodec::default());
+            let mut opcodes = Vec::new();
+            while let Some(request) = framed.next().await.transpose().unwrap() {
+                opcodes.push(request.opcode);
+                let mut response = success_response(&request);
+                match request.opcode {
+                    Opcode::HELLO => {
+                        let mut value = BytesMut::new();
+                        value.put_u16(HelloFeature::SelectBucket.as_u16());
+                        value.put_u16(HelloFeature::Collections.as_u16());
+                        response.value = value.freeze();
+                    }
+                    Opcode::SASL_LIST_MECHS => response.value = Bytes::from_static(b"PLAIN"),
+                    Opcode::SASL_AUTH | Opcode::SELECT_BUCKET => {}
+                    opcode => panic!("unexpected KV bootstrap opcode: {opcode:?}"),
+                }
+                framed.send(response).await.unwrap();
+            }
+            opcodes
+        });
+
+        let bootstrapped =
+            bootstrap_kv_on_connection(connection, &test_config(), "rust-dcp-membership")
+                .await
+                .unwrap();
+        assert!(
+            bootstrapped
+                .capabilities()
+                .supports(HelloFeature::Collections)
+        );
+        drop(bootstrapped);
+        let opcodes = server.await.unwrap();
+
+        assert_eq!(
+            opcodes,
+            vec![
+                Opcode::HELLO,
+                Opcode::SASL_LIST_MECHS,
+                Opcode::SASL_AUTH,
+                Opcode::SELECT_BUCKET,
+            ]
+        );
     }
 
     #[tokio::test]

@@ -74,6 +74,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -310,6 +319,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "bytes",
+ "crc32fast",
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
@@ -329,6 +339,20 @@ dependencies = [
  "tokio-util",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "rust-dcp-membership-couchbase"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rust-dcp-core",
+ "rust-dcp-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

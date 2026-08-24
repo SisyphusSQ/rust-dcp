@@ -73,6 +73,10 @@ impl Opcode {
     pub const GET: Self = Self(0x00);
     /// Write a document.
     pub const SET: Self = Self(0x01);
+    /// Create a document only when its key is absent.
+    pub const ADD: Self = Self(0x02);
+    /// Replace a document only when its key is present.
+    pub const REPLACE: Self = Self(0x03);
     /// Delete a document.
     pub const DELETE: Self = Self(0x04);
     /// Basic NOOP command.
@@ -158,6 +162,10 @@ pub struct Status(pub u16);
 impl Status {
     /// Successful response.
     pub const SUCCESS: Self = Self(0x00);
+    /// Document key is absent.
+    pub const KEY_NOT_FOUND: Self = Self(0x01);
+    /// Document key or CAS value conflicts with current state.
+    pub const KEY_EXISTS: Self = Self(0x02);
     /// Request arguments are invalid for this server or command.
     pub const INVALID_ARGUMENTS: Self = Self(0x04);
     /// Request was sent to a non-owner node.
