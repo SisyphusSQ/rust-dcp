@@ -2,6 +2,7 @@
 members = [
     "crates/rust-dcp",
     "crates/rust-dcp-core",
+    "crates/rust-dcp-membership-couchbase",
     "crates/rust-dcp-protocol",
 ]
 resolver = "3"
@@ -16,6 +17,7 @@ authors = ["SisyphusSQ"]
 [workspace.dependencies]
 bytes = { version = "1.10", features = ["serde"] }
 base64 = "0.22"
+crc32fast = "1.5"
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.4"
 hmac = "0.12"

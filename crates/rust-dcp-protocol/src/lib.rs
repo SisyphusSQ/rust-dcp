@@ -14,12 +14,13 @@ mod uleb128;
 
 pub use codec::FrameCodec;
 pub use command::{
-    CollectionId, DcpOpenFlags, DcpStreamFlags, HelloFeature, StreamFilter, StreamRequest,
-    StreamRequestResponse, VBucketSeqNo, VBucketState, buffer_ack, close_stream, dcp_control,
-    dcp_open, get_cluster_config, get_collection_id, get_collection_manifest, get_failover_log,
-    get_vbucket_seqnos, hello, noop_response, parse_collection_id, parse_collection_manifest,
-    parse_failover_log, parse_stream_request_response, parse_vbucket_seqnos, sasl_auth,
-    sasl_list_mechanisms, sasl_step, select_bucket, snapshot_marker_response, stream_request,
+    CollectionId, DcpOpenFlags, DcpStreamFlags, DocumentStoreMode, DocumentStoreRequest,
+    HelloFeature, StreamFilter, StreamRequest, StreamRequestResponse, VBucketSeqNo, VBucketState,
+    buffer_ack, close_stream, dcp_control, dcp_open, delete_document, get_cluster_config,
+    get_collection_id, get_collection_manifest, get_document, get_failover_log, get_vbucket_seqnos,
+    hello, noop_response, parse_collection_id, parse_collection_manifest, parse_failover_log,
+    parse_stream_request_response, parse_vbucket_seqnos, sasl_auth, sasl_list_mechanisms,
+    sasl_step, select_bucket, snapshot_marker_response, store_document, stream_request,
 };
 pub use dcp::{
     DcpDeletion, DcpExpiration, DcpMessage, DcpMutation, OsoSnapshot, OsoSnapshotState,

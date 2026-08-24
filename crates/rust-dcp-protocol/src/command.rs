@@ -291,6 +291,42 @@ pub struct CollectionId {
     pub collection_id: u32,
 }
 
+/// Mutation command used for a normal Couchbase KV document write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentStoreMode {
+    /// Create or replace a document.
+    Set,
+    /// Create only when the key is absent.
+    Add,
+    /// Replace only when the key is present.
+    Replace,
+}
+
+/// Complete wire fields for one normal Couchbase KV document write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentStoreRequest {
+    /// Store command semantics.
+    pub mode: DocumentStoreMode,
+    /// User key without a collection-ID prefix.
+    pub key: Bytes,
+    /// Document value.
+    pub value: Bytes,
+    /// Collection ID, or the default collection when omitted.
+    pub collection_id: Option<u32>,
+    /// Routed vBucket identifier.
+    pub vbucket: u16,
+    /// Memcached document flags.
+    pub flags: u32,
+    /// Relative expiry in seconds, or zero for no expiry.
+    pub expiry: u32,
+    /// Memcached datatype byte.
+    pub datatype: u8,
+    /// Compare-and-swap token, or zero when unconditional.
+    pub cas: u64,
+    /// Correlation token.
+    pub opaque: u32,
+}
+
 /// Builds a `HELLO` feature-negotiation request.
 #[must_use]
 pub fn hello(client_name: &str, features: &[HelloFeature], opaque: u32) -> Frame {
@@ -371,6 +407,63 @@ pub fn get_collection_id(scope: &str, collection: &str, opaque: u32) -> Result<F
     frame.value = Bytes::from(format!("{scope}.{collection}"));
     frame.opaque = opaque;
     Ok(frame)
+}
+
+/// Builds a collection-aware normal KV document read.
+#[must_use]
+pub fn get_document(
+    key: impl AsRef<[u8]>,
+    collection_id: Option<u32>,
+    vbucket: u16,
+    opaque: u32,
+) -> Frame {
+    let mut frame = Frame::request(Opcode::GET);
+    frame.key = Bytes::copy_from_slice(key.as_ref());
+    frame.collection_id = collection_id;
+    frame.vbucket = vbucket;
+    frame.opaque = opaque;
+    frame
+}
+
+/// Builds a collection-aware normal KV document write.
+#[must_use]
+pub fn store_document(request: DocumentStoreRequest) -> Frame {
+    let opcode = match request.mode {
+        DocumentStoreMode::Set => Opcode::SET,
+        DocumentStoreMode::Add => Opcode::ADD,
+        DocumentStoreMode::Replace => Opcode::REPLACE,
+    };
+    let mut extras = BytesMut::with_capacity(8);
+    extras.put_u32(request.flags);
+    extras.put_u32(request.expiry);
+    let mut frame = Frame::request(opcode);
+    frame.key = request.key;
+    frame.value = request.value;
+    frame.collection_id = request.collection_id;
+    frame.vbucket = request.vbucket;
+    frame.extras = extras.freeze();
+    frame.datatype = request.datatype;
+    frame.cas = request.cas;
+    frame.opaque = request.opaque;
+    frame
+}
+
+/// Builds a collection-aware normal KV document delete.
+#[must_use]
+pub fn delete_document(
+    key: impl AsRef<[u8]>,
+    collection_id: Option<u32>,
+    vbucket: u16,
+    cas: u64,
+    opaque: u32,
+) -> Frame {
+    let mut frame = Frame::request(Opcode::DELETE);
+    frame.key = Bytes::copy_from_slice(key.as_ref());
+    frame.collection_id = collection_id;
+    frame.vbucket = vbucket;
+    frame.cas = cas;
+    frame.opaque = opaque;
+    frame
 }
 
 /// Builds a DCP connection-open request.
@@ -873,6 +966,39 @@ mod tests {
 
         response.extras = Bytes::from_static(&[0; 11]);
         assert!(parse_collection_id(&response).is_err());
+    }
+
+    #[test]
+    fn collection_document_requests_match_the_memcached_wire_contract() {
+        let get = get_document(b"membership", Some(0xcafe), 12, 7);
+        assert_eq!(get.opcode, Opcode::GET);
+        assert_eq!(get.vbucket, 12);
+        assert_eq!(get.collection_id, Some(0xcafe));
+        assert_eq!(&get.key[..], b"membership");
+        assert_eq!(get.opaque, 7);
+
+        let add = store_document(DocumentStoreRequest {
+            mode: DocumentStoreMode::Add,
+            key: Bytes::from_static(b"membership"),
+            value: Bytes::from_static(br#"{"generation":1}"#),
+            collection_id: Some(0xcafe),
+            vbucket: 12,
+            flags: 0x0200_0000,
+            expiry: 30,
+            datatype: 0x01,
+            cas: 0,
+            opaque: 8,
+        });
+        assert_eq!(add.opcode, Opcode::ADD);
+        assert_eq!(&add.extras[..4], &0x0200_0000_u32.to_be_bytes());
+        assert_eq!(&add.extras[4..], &30_u32.to_be_bytes());
+        assert_eq!(add.datatype, 0x01);
+        assert_eq!(add.cas, 0);
+
+        let delete = delete_document(b"membership", Some(0xcafe), 12, 99, 9);
+        assert_eq!(delete.opcode, Opcode::DELETE);
+        assert_eq!(delete.cas, 99);
+        assert_eq!(delete.vbucket, 12);
     }
 
     #[test]
