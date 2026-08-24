@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 rust-dcp-core = { path = "../rust-dcp-core", version = "0.1.0" }
 rust-dcp-protocol = { path = "../rust-dcp-protocol", version = "0.1.0" }
 

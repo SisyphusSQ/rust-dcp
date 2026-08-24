@@ -152,6 +152,20 @@ impl VBucketStreamRequest {
         self.end_seqno
     }
 
+    pub(crate) fn with_frozen_end_seqno(mut self, end_seqno: u64) -> Result<Self> {
+        if end_seqno < self.checkpoint.seqno {
+            return Err(DcpError::Stream {
+                vbucket: self.checkpoint.vbucket,
+                message: format!(
+                    "frozen stream end {end_seqno} is behind effective start {}",
+                    self.checkpoint.seqno
+                ),
+            });
+        }
+        self.end_seqno = end_seqno;
+        Ok(self)
+    }
+
     /// Optional multiplexed stream ID.
     #[must_use]
     pub fn stream_id(&self) -> Option<u16> {
@@ -242,6 +256,7 @@ pub struct RollbackApplied {
 /// Effective state returned for an opened partition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartitionOpenState {
+    effective_checkpoint: DcpCheckpoint,
     /// vBucket identifier.
     pub vbucket: u16,
     /// Effective start sequence number after any explicit rewind.
@@ -254,6 +269,14 @@ pub struct PartitionOpenState {
     pub stream_id: Option<u16>,
     /// Opaque token assigned to this stream request and echoed by its events.
     pub opaque: u32,
+}
+
+impl PartitionOpenState {
+    /// Complete checkpoint actually used by the accepted stream request.
+    #[must_use]
+    pub const fn checkpoint(&self) -> &DcpCheckpoint {
+        &self.effective_checkpoint
+    }
 }
 
 /// Synchronous result of opening every requested vBucket stream.
@@ -527,8 +550,11 @@ async fn open_partition(
                         request.checkpoint.vbucket
                     ))
                 })?;
+                let mut effective_checkpoint = request.checkpoint.clone();
+                effective_checkpoint.vbucket_uuid = current.vbucket_uuid;
                 return Ok((
                     PartitionOpenState {
+                        effective_checkpoint,
                         vbucket: request.checkpoint.vbucket,
                         start_seqno: request.checkpoint.seqno,
                         end_seqno: request.end_seqno,
@@ -1762,6 +1788,12 @@ mod tests {
                 vbucket_uuid: 0xbbbb,
             }]
         );
+        let effective = stream.open_report().partitions()[&7].checkpoint();
+        assert_eq!(effective.seqno, 20);
+        assert_eq!(effective.snapshot_start, 20);
+        assert_eq!(effective.snapshot_end, 20);
+        assert_eq!(effective.vbucket_uuid, 0xbbbb);
+        assert_eq!(effective.manifest_uid, None);
         stream.shutdown().await.unwrap();
         server.await.unwrap();
     }

@@ -8,10 +8,12 @@ mod bootstrap;
 mod checkpoint;
 mod checkpoint_runtime;
 mod checkpoint_store;
+mod client;
 mod collections;
 mod config;
 mod error;
 mod event;
+mod observability;
 mod stream;
 mod topology;
 mod transport;
@@ -31,6 +33,7 @@ pub use checkpoint_store::{
     CheckpointStore, CheckpointStoreFuture, CouchbaseCheckpointCollection,
     CouchbaseCheckpointStore, FileCheckpointStore,
 };
+pub use client::{DcpClient, DcpDelivery, DcpSubscription, DcpSubscriptionSpec};
 pub use collections::{
     CollectionManifest, CollectionRegistry, CollectionRegistryStatus, CollectionSelection,
     CollectionStream, ManifestCollection, ManifestScope, ResolvedCollectionFilter,
@@ -47,6 +50,9 @@ pub use event::{
     DataType, DcpDeletion, DcpEvent, DcpExpiration, DcpMutation, OsoSnapshot, OsoSnapshotState,
     SeqNoAdvanced, SnapshotFlags, SnapshotMarker, StreamEnd, StreamEndReason, SystemEvent,
     SystemEventKind,
+};
+pub use observability::{
+    DcpHealth, DcpHealthSnapshot, DcpHealthStatus, DcpMetrics, DcpMetricsSnapshot,
 };
 pub use rust_dcp_protocol::{DcpStreamFlags, StreamFilter};
 pub use stream::{

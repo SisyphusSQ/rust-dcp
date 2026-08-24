@@ -552,6 +552,62 @@ impl CheckpointCoordinator {
             .collect())
     }
 
+    /// Returns the contiguous application-processed checkpoint for every
+    /// tracked vBucket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the coordinator state was poisoned.
+    pub fn processed_checkpoints(&self) -> Result<BTreeMap<u16, DcpCheckpoint>> {
+        let state = lock_state(&self.inner.state)?;
+        Ok(state
+            .partitions
+            .iter()
+            .map(|(&vbucket, partition)| (vbucket, partition.processed.clone()))
+            .collect())
+    }
+
+    /// Replaces effective stream starts after a connection generation is
+    /// reopened and invalidates every outstanding ACK token for those
+    /// vBuckets.
+    ///
+    /// A changed effective checkpoint is marked dirty, including a rollback
+    /// to an earlier sequence or a new failover UUID, so a later flush cannot
+    /// leave the pre-reopen resume point durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity, checkpoint, unknown-vBucket, generation-overflow,
+    /// or poisoned-state error. Validation completes before any partition is
+    /// changed.
+    pub fn rebase_partitions(&self, effective: &BTreeMap<u16, DcpCheckpoint>) -> Result<()> {
+        let mut state = lock_state(&self.inner.state)?;
+        for (&vbucket, checkpoint) in effective {
+            let partition = state.partitions.get(&vbucket).ok_or_else(|| {
+                DcpError::Checkpoint(format!("cannot rebase untracked vBucket {vbucket}"))
+            })?;
+            validate_checkpoint_identity(vbucket, &self.inner.bucket_uuid, checkpoint)?;
+            if partition.processed != *checkpoint && partition.generation == u64::MAX {
+                return Err(DcpError::Checkpoint(format!(
+                    "checkpoint generation overflow for vBucket {vbucket}"
+                )));
+            }
+        }
+        for (&vbucket, checkpoint) in effective {
+            let partition = state.partitions.get_mut(&vbucket).ok_or_else(|| {
+                DcpError::Checkpoint(format!("cannot rebase untracked vBucket {vbucket}"))
+            })?;
+            if partition.processed != *checkpoint {
+                partition.generation += 1;
+            }
+            partition.processed = checkpoint.clone();
+            partition.last_registered_seqno = checkpoint.seqno;
+            partition.snapshot = None;
+            partition.pending.clear();
+        }
+        Ok(())
+    }
+
     /// Flush counters and last automatic/manual store error.
     ///
     /// # Errors
@@ -1012,6 +1068,42 @@ mod tests {
         assert_eq!(report.remaining_dirty, 0);
         assert_eq!(store.saved(7), Some(checkpoint(7)));
         assert!(!coordinator.statuses().unwrap()[&7].dirty);
+        coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_rebases_processed_state_and_invalidates_old_ack_tokens() {
+        let store = Arc::new(MemoryStore::default());
+        let coordinator = coordinator(manual_config(), store.clone()).await;
+        coordinator.track_event(snapshot(7, 1, 2)).unwrap();
+        coordinator
+            .track_event(progress(7, 1))
+            .unwrap()
+            .acknowledge()
+            .unwrap();
+        let stale = coordinator.track_event(progress(7, 2)).unwrap();
+        let mut effective = coordinator.processed_checkpoints().unwrap()[&7].clone();
+        effective.vbucket_uuid = 0xbbbb;
+
+        coordinator
+            .rebase_partitions(&BTreeMap::from([(7, effective.clone())]))
+            .unwrap();
+
+        let status = &coordinator.statuses().unwrap()[&7];
+        assert_eq!(status.processed, effective);
+        assert_eq!(status.pending_events, 0);
+        assert!(status.dirty);
+        assert!(stale.acknowledge().is_err());
+
+        coordinator.track_event(snapshot(7, 2, 2)).unwrap();
+        coordinator
+            .track_event(progress(7, 2))
+            .unwrap()
+            .acknowledge()
+            .unwrap();
+        coordinator.flush().await.unwrap();
+        assert_eq!(store.saved(7).unwrap().vbucket_uuid, 0xbbbb);
+        assert_eq!(store.saved(7).unwrap().seqno, 2);
         coordinator.shutdown().await.unwrap();
     }
 
