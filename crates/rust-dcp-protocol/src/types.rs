@@ -158,6 +158,8 @@ pub struct Status(pub u16);
 impl Status {
     /// Successful response.
     pub const SUCCESS: Self = Self(0x00);
+    /// Request arguments are invalid for this server or command.
+    pub const INVALID_ARGUMENTS: Self = Self(0x04);
     /// Request was sent to a non-owner node.
     pub const NOT_MY_VBUCKET: Self = Self(0x07);
     /// Authentication failed.

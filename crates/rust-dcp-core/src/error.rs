@@ -3,6 +3,7 @@ use std::{io, time::Duration};
 use thiserror::Error;
 
 use crate::FailoverEntry;
+use rust_dcp_protocol::ProtocolError;
 
 /// Result type used throughout `rust-dcp`.
 pub type Result<T, E = DcpError> = std::result::Result<T, E>;
@@ -16,8 +17,8 @@ pub enum DcpError {
     InvalidConfiguration(String),
 
     /// A wire frame or protocol message is invalid.
-    #[error("protocol error: {0}")]
-    Protocol(String),
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
 
     /// An I/O operation failed.
     #[error("I/O error: {0}")]
