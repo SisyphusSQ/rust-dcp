@@ -51,6 +51,10 @@ pub enum DcpError {
     #[error("unsupported capability: {0}")]
     Unsupported(String),
 
+    /// Collection manifest, filter, or event state is inconsistent.
+    #[error("collection state error: {0}")]
+    Collection(String),
+
     /// A checkpoint could not be validated or persisted.
     #[error("checkpoint error: {0}")]
     Checkpoint(String),

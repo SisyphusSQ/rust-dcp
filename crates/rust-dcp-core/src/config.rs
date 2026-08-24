@@ -246,17 +246,10 @@ impl Default for CollectionFilter {
 }
 
 impl CollectionFilter {
-    fn validate(&self) -> Result<()> {
-        if self.scope.trim().is_empty() {
-            return Err(DcpError::InvalidConfiguration(
-                "collection scope must not be empty".into(),
-            ));
-        }
-        if self.collections.is_empty() || self.collections.iter().any(|name| name.trim().is_empty())
-        {
-            return Err(DcpError::InvalidConfiguration(
-                "at least one non-empty collection is required".into(),
-            ));
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_collection_name("scope", &self.scope)?;
+        for collection in &self.collections {
+            validate_collection_name("collection", collection)?;
         }
 
         let unique = self
@@ -270,6 +263,23 @@ impl CollectionFilter {
         }
         Ok(())
     }
+}
+
+fn validate_collection_name(kind: &str, name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 251 {
+        return Err(DcpError::InvalidConfiguration(format!(
+            "{kind} name must contain between 1 and 251 ASCII characters"
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'%'))
+    {
+        return Err(DcpError::InvalidConfiguration(format!(
+            "{kind} name contains a character unsupported by Couchbase collections"
+        )));
+    }
+    Ok(())
 }
 
 /// Connection-level DCP flow-control settings.
@@ -657,6 +667,26 @@ mod tests {
             .build();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn collection_filter_rejects_names_the_server_cannot_represent() {
+        for (scope, collection) in [
+            ("inventory.with-dot", "airline"),
+            ("inventory", "white space"),
+            ("inventory", "airline/legacy"),
+        ] {
+            let result = DcpConfig::builder(Credentials::new("alice", "secret"), "bucket")
+                .seed("localhost")
+                .expect("seed is valid")
+                .collections(CollectionFilter {
+                    scope: scope.into(),
+                    collections: vec![collection.into()],
+                })
+                .build();
+
+            assert!(result.is_err(), "{scope}.{collection} must be rejected");
+        }
     }
 
     #[test]

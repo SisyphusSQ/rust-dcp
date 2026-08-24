@@ -45,7 +45,9 @@ impl VBucketStreamRequest {
     ///
     /// `high_seqno` is also frozen as the end boundary for finite mode. The
     /// default request is active-only and never opts into ignoring purged
-    /// tombstones.
+    /// tombstones. For a collection filter, the wire manifest UID is replaced
+    /// with the UID observed at this vBucket's checkpoint; a new stream omits
+    /// it until a system event has actually been observed.
     ///
     /// # Errors
     ///
@@ -106,6 +108,10 @@ impl VBucketStreamRequest {
         let mut flags = DcpStreamFlags::ACTIVE_ONLY;
         if explicit_checkpoint && checkpoint.seqno == 0 {
             flags |= DcpStreamFlags::STRICT_VBUUID;
+        }
+        let mut filter = filter;
+        if let Some(filter) = filter.as_mut() {
+            filter.manifest_uid = checkpoint.manifest_uid;
         }
         if filter.as_ref().and_then(|filter| filter.stream_id) == Some(0) {
             return Err(DcpError::InvalidConfiguration(format!(
@@ -180,6 +186,10 @@ impl VBucketStreamRequest {
         self.checkpoint.seqno = rollback_seqno;
         self.checkpoint.snapshot_start = rollback_seqno;
         self.checkpoint.snapshot_end = rollback_seqno;
+        self.checkpoint.manifest_uid = None;
+        if let Some(filter) = self.filter.as_mut() {
+            filter.manifest_uid = None;
+        }
         self.checkpoint.validate()?;
         Ok(branch.vbucket_uuid)
     }
@@ -479,7 +489,6 @@ fn validate_requests(requests: &[VBucketStreamRequest]) -> Result<()> {
         ));
     }
     let mut vbuckets = BTreeSet::new();
-    let mut stream_ids = BTreeSet::new();
     for request in requests {
         request.checkpoint.validate()?;
         if request.checkpoint.seqno > request.end_seqno {
@@ -492,13 +501,6 @@ fn validate_requests(requests: &[VBucketStreamRequest]) -> Result<()> {
             return Err(DcpError::InvalidConfiguration(format!(
                 "duplicate stream request for vBucket {}",
                 request.checkpoint.vbucket
-            )));
-        }
-        if let Some(stream_id) = request.stream_id()
-            && !stream_ids.insert(stream_id)
-        {
-            return Err(DcpError::InvalidConfiguration(format!(
-                "duplicate DCP stream ID {stream_id}"
             )));
         }
     }
@@ -1275,6 +1277,111 @@ mod tests {
         assert_eq!(latest.checkpoint().seqno, 99);
         assert_eq!(latest.checkpoint().snapshot_start, 99);
         assert_eq!(latest.end_seqno(), u64::MAX);
+    }
+
+    #[test]
+    fn collection_filter_uses_the_manifest_uid_observed_at_the_checkpoint() {
+        let checkpoint = DcpCheckpoint {
+            bucket_uuid: Some("bucket-id".into()),
+            vbucket: 7,
+            vbucket_uuid: 0xaaaa,
+            seqno: 42,
+            snapshot_start: 40,
+            snapshot_end: 50,
+            manifest_uid: Some(0x17),
+        };
+        let request = VBucketStreamRequest::resolve(
+            7,
+            Some("bucket-id"),
+            &StartPosition::Checkpoint(checkpoint),
+            DcpMode::Infinite,
+            99,
+            failover_log(),
+            Some(StreamFilter {
+                collection_ids: vec![8],
+                manifest_uid: Some(0x2a),
+                ..StreamFilter::default()
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.wire_request().filter.unwrap().manifest_uid,
+            Some(0x17)
+        );
+    }
+
+    #[test]
+    fn new_collection_stream_does_not_claim_an_unobserved_manifest_uid() {
+        let request = VBucketStreamRequest::resolve(
+            7,
+            Some("bucket-id"),
+            &StartPosition::Earliest,
+            DcpMode::Infinite,
+            99,
+            failover_log(),
+            Some(StreamFilter {
+                collection_ids: vec![8],
+                manifest_uid: Some(0x2a),
+                ..StreamFilter::default()
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.wire_request().filter.unwrap().manifest_uid, None);
+    }
+
+    #[test]
+    fn one_stream_id_can_be_reused_across_distinct_vbuckets() {
+        let request = |vbucket| {
+            VBucketStreamRequest::resolve(
+                vbucket,
+                Some("bucket-id"),
+                &StartPosition::Earliest,
+                DcpMode::Infinite,
+                99,
+                failover_log(),
+                Some(StreamFilter {
+                    collection_ids: vec![8],
+                    stream_id: Some(7),
+                    ..StreamFilter::default()
+                }),
+            )
+            .unwrap()
+        };
+
+        assert!(validate_requests(&[request(7), request(8)]).is_ok());
+    }
+
+    #[test]
+    fn rollback_clears_a_manifest_uid_observed_after_the_rewind_point() {
+        let checkpoint = DcpCheckpoint {
+            bucket_uuid: Some("bucket-id".into()),
+            vbucket: 7,
+            vbucket_uuid: 0xaaaa,
+            seqno: 42,
+            snapshot_start: 40,
+            snapshot_end: 50,
+            manifest_uid: Some(0x17),
+        };
+        let mut request = VBucketStreamRequest::resolve(
+            7,
+            Some("bucket-id"),
+            &StartPosition::Checkpoint(checkpoint),
+            DcpMode::Infinite,
+            99,
+            failover_log(),
+            Some(StreamFilter {
+                collection_ids: vec![8],
+                ..StreamFilter::default()
+            }),
+        )
+        .unwrap();
+
+        request.rewind(20, &failover_log()).unwrap();
+
+        assert_eq!(request.checkpoint().manifest_uid, None);
+        assert_eq!(request.wire_request().filter.unwrap().manifest_uid, None);
     }
 
     #[test]
