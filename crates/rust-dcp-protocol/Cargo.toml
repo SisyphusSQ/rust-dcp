@@ -1,0 +1,11 @@
+[package]
+name = "rust-dcp-protocol"
+description = "Couchbase DCP and Memcached binary protocol primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

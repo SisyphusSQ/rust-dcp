@@ -1,0 +1,17 @@
+[package]
+name = "rust-dcp-core"
+description = "Cluster, stream, and recovery foundations for rust-dcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes.workspace = true
+humantime-serde.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
